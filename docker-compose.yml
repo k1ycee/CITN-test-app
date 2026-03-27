@@ -1,0 +1,21 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    ports:
+      - "5000:5000"
+    env_file:
+      - ./backend/.env
+    volumes:
+      - ./backend:/app
+
+  flutter:
+    image: ghcr.io/cirruslabs/flutter:stable
+    working_dir: /workspace
+    command: sh -lc "flutter pub get && flutter run -d web-server --web-hostname 0.0.0.0 --web-port 3000"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./:/workspace
+    depends_on:
+      - backend
