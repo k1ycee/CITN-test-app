@@ -19,4 +19,7 @@ class Config:
     MAX_CONTENT_LENGTH = 50 * 1024 * 1024  # 50MB max upload
 
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-    GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+    GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
+    GEMINI_PARSE_BATCH_CHARS = int(
+        os.getenv("GEMINI_PARSE_BATCH_CHARS", "12000")
+    )

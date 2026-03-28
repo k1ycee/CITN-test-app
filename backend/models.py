@@ -123,6 +123,7 @@ class Question(db.Model):
             }
         if include_answer:
             data["correct_answer"] = self.correct_answer
+            data["has_correct_answer"] = bool(self.correct_answer.strip())
         return data
 
 

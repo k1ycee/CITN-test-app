@@ -193,10 +193,18 @@ def _store_parsed_quiz(filename: str, parsed: dict) -> Quiz:
 
 def _grade_question(question: Question, student_answer: str) -> dict:
     student_answer = student_answer.strip()
+    correct_answer = question.correct_answer.strip()
+
+    if not correct_answer:
+        return {
+            "is_correct": False,
+            "status": "incorrect",
+            "explanation": "No reliable correct answer was extracted for this question.",
+        }
 
     if question.question_type == "MCQ":
         normalized_student = student_answer.upper()
-        normalized_correct = question.correct_answer.strip().upper()
+        normalized_correct = correct_answer.upper()
         is_correct = normalized_student == normalized_correct
         return {
             "is_correct": is_correct,
@@ -218,12 +226,12 @@ def _grade_question(question: Question, student_answer: str) -> dict:
     try:
         grading = grade_answer_with_ai(
             question_text=question.question_text,
-            correct_answer=question.correct_answer,
+            correct_answer=correct_answer,
             student_answer=student_answer,
         )
     except Exception as exc:  # pragma: no cover - external dependency guard
         logger.warning("AI grading failed, falling back to exact compare: %s", exc)
-        is_correct = student_answer.lower() == question.correct_answer.strip().lower()
+        is_correct = student_answer.lower() == correct_answer.lower()
         grading = {
             "is_correct": is_correct,
             "status": "correct" if is_correct else "incorrect",
@@ -240,5 +248,5 @@ app = create_app()
 
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "5000"))
+    port = int(os.getenv("PORT", "3000"))
     app.run(host="0.0.0.0", port=port, debug=True)
