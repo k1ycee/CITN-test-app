@@ -1,3 +1,4 @@
+import "dart:async";
 import "dart:convert";
 
 import "package:file_selector/file_selector.dart";
@@ -5,6 +6,7 @@ import "package:flutter/material.dart";
 import "package:http/http.dart" as http;
 
 const String defaultApiBaseUrl = "http://127.0.0.1:5000/api";
+const Duration textAnswerDebounce = Duration(milliseconds: 700);
 
 void main() {
   runApp(const PdfQuizApp());
@@ -43,6 +45,10 @@ class QuizDashboardPage extends StatefulWidget {
 class _QuizDashboardPageState extends State<QuizDashboardPage> {
   final QuizApi _api = QuizApi();
   final Map<int, String> _answers = <int, String>{};
+  final Map<int, QuestionCheckResult> _questionResults =
+      <int, QuestionCheckResult>{};
+  final Map<int, Timer> _answerDebouncers = <int, Timer>{};
+  final Set<int> _checkingQuestionIds = <int>{};
 
   List<QuizSummary> _quizzes = const <QuizSummary>[];
   QuizDetail? _selectedQuiz;
@@ -56,6 +62,14 @@ class _QuizDashboardPageState extends State<QuizDashboardPage> {
   void initState() {
     super.initState();
     _refresh();
+  }
+
+  @override
+  void dispose() {
+    for (final timer in _answerDebouncers.values) {
+      timer.cancel();
+    }
+    super.dispose();
   }
 
   Future<void> _refresh({int? focusQuizId}) async {
@@ -94,6 +108,12 @@ class _QuizDashboardPageState extends State<QuizDashboardPage> {
   void _syncAnswers({required bool clearExisting}) {
     if (clearExisting) {
       _answers.clear();
+      _questionResults.clear();
+      _checkingQuestionIds.clear();
+      for (final timer in _answerDebouncers.values) {
+        timer.cancel();
+      }
+      _answerDebouncers.clear();
     }
     final quiz = _selectedQuiz;
     if (quiz == null) {
@@ -145,11 +165,11 @@ class _QuizDashboardPageState extends State<QuizDashboardPage> {
 
     try {
       final bytes = await file.readAsBytes();
-      final quiz = await _api.uploadPdf(file.name, bytes);
+      final uploadResult = await _api.uploadPdf(file.name, bytes);
       if (!mounted) {
         return;
       }
-      await _refresh(focusQuizId: quiz.id);
+      await _refresh(focusQuizId: uploadResult.primaryQuizId);
     } catch (error) {
       if (!mounted) {
         return;
@@ -192,6 +212,9 @@ class _QuizDashboardPageState extends State<QuizDashboardPage> {
       }
       setState(() {
         _submission = submission;
+        for (final result in submission.results) {
+          _questionResults[result.questionId] = result;
+        }
       });
     } catch (error) {
       if (!mounted) {
@@ -206,6 +229,64 @@ class _QuizDashboardPageState extends State<QuizDashboardPage> {
           _submitting = false;
         });
       }
+    }
+  }
+
+  void _handleAnswerChange(QuestionItem question, String value) {
+    setState(() {
+      _answers[question.id] = value;
+      _questionResults.remove(question.id);
+    });
+
+    _answerDebouncers[question.id]?.cancel();
+
+    if (value.trim().isEmpty) {
+      setState(() {
+        _checkingQuestionIds.remove(question.id);
+      });
+      return;
+    }
+
+    if (question.questionType == "MCQ") {
+      unawaited(_checkSingleQuestion(question.id, value));
+      return;
+    }
+
+    _answerDebouncers[question.id] = Timer(textAnswerDebounce, () {
+      unawaited(_checkSingleQuestion(question.id, value));
+    });
+  }
+
+  Future<void> _checkSingleQuestion(int questionId, String answer) async {
+    if ((_answers[questionId] ?? "") != answer) {
+      return;
+    }
+
+    setState(() {
+      _checkingQuestionIds.add(questionId);
+      _error = null;
+    });
+
+    try {
+      final result = await _api.submitQuestion(questionId, answer);
+      if (!mounted) {
+        return;
+      }
+      if ((_answers[questionId] ?? "") != answer) {
+        return;
+      }
+      setState(() {
+        _questionResults[questionId] = result;
+        _checkingQuestionIds.remove(questionId);
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _checkingQuestionIds.remove(questionId);
+        _error = error.toString();
+      });
     }
   }
 
@@ -248,12 +329,10 @@ class _QuizDashboardPageState extends State<QuizDashboardPage> {
                     quiz: quiz,
                     answers: _answers,
                     submission: _submission,
+                    questionResults: _questionResults,
+                    checkingQuestionIds: _checkingQuestionIds,
                     submitting: _submitting,
-                    onChange: (id, value) {
-                      setState(() {
-                        _answers[id] = value;
-                      });
-                    },
+                    onChange: _handleAnswerChange,
                     onSubmit: _submit,
                   );
 
@@ -352,6 +431,8 @@ class _QuizWorkspace extends StatelessWidget {
     required this.quiz,
     required this.answers,
     required this.submission,
+    required this.questionResults,
+    required this.checkingQuestionIds,
     required this.submitting,
     required this.onChange,
     required this.onSubmit,
@@ -360,8 +441,10 @@ class _QuizWorkspace extends StatelessWidget {
   final QuizDetail? quiz;
   final Map<int, String> answers;
   final SubmissionSummary? submission;
+  final Map<int, QuestionCheckResult> questionResults;
+  final Set<int> checkingQuestionIds;
   final bool submitting;
-  final void Function(int id, String value) onChange;
+  final void Function(QuestionItem question, String value) onChange;
   final Future<void> Function() onSubmit;
 
   @override
@@ -420,7 +503,9 @@ class _QuizWorkspace extends StatelessWidget {
                 child: _QuestionCard(
                   question: question,
                   currentAnswer: answers[question.id] ?? "",
-                  onChanged: (value) => onChange(question.id, value),
+                  result: questionResults[question.id],
+                  isChecking: checkingQuestionIds.contains(question.id),
+                  onChanged: (value) => onChange(question, value),
                 ),
               ),
             Align(
@@ -448,27 +533,63 @@ class _QuestionCard extends StatelessWidget {
   const _QuestionCard({
     required this.question,
     required this.currentAnswer,
+    required this.result,
+    required this.isChecking,
     required this.onChanged,
   });
 
   final QuestionItem question;
   final String currentAnswer;
+  final QuestionCheckResult? result;
+  final bool isChecking;
   final ValueChanged<String> onChanged;
 
   @override
   Widget build(BuildContext context) {
-    return Container(
+    final borderColor = result == null
+        ? const Color(0xFFD7DED3)
+        : result!.isCorrect
+            ? const Color(0xFF2E7D32)
+            : const Color(0xFFC62828);
+    final backgroundColor = result == null
+        ? Colors.white
+        : result!.isCorrect
+            ? const Color(0xFFE7F6E9)
+            : const Color(0xFFFDEAEA);
+
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 220),
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
+        color: backgroundColor,
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0xFFD7DED3)),
+        border: Border.all(color: borderColor, width: 1.4),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            "Q${question.questionNumber} [${question.questionType}]",
-            style: const TextStyle(fontWeight: FontWeight.w700),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  "Q${question.questionNumber} [${question.questionType}]",
+                  style: const TextStyle(fontWeight: FontWeight.w700),
+                ),
+              ),
+              if (isChecking)
+                const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              else if (result != null)
+                Icon(
+                  result!.isCorrect ? Icons.check_circle : Icons.cancel,
+                  color: result!.isCorrect
+                      ? const Color(0xFF2E7D32)
+                      : const Color(0xFFC62828),
+                ),
+            ],
           ),
           const SizedBox(height: 8),
           Text(question.questionText),
@@ -496,6 +617,24 @@ class _QuestionCard extends StatelessWidget {
                 hintText: "Enter your answer",
               ),
             ),
+          if (result != null) ...[
+            const SizedBox(height: 12),
+            Text(
+              result!.isCorrect ? "Correct" : "Incorrect",
+              style: TextStyle(
+                fontWeight: FontWeight.w700,
+                color: result!.isCorrect
+                    ? const Color(0xFF2E7D32)
+                    : const Color(0xFFC62828),
+              ),
+            ),
+            if (result!.hasCorrectAnswer) ...[
+              const SizedBox(height: 4),
+              Text("Correct answer: ${result!.correctAnswer}"),
+            ],
+            const SizedBox(height: 4),
+            Text(result!.explanation),
+          ],
         ],
       ),
     );
@@ -524,13 +663,13 @@ class QuizApi {
     return QuizDetail.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
   }
 
-  Future<QuizDetail> uploadPdf(String filename, List<int> bytes) async {
+  Future<UploadResult> uploadPdf(String filename, List<int> bytes) async {
     final request = http.MultipartRequest("POST", _uri("/upload"))
       ..files.add(http.MultipartFile.fromBytes("file", bytes, filename: filename));
     final streamed = await request.send();
     final response = await http.Response.fromStream(streamed);
     _throwIfFailed(response);
-    return QuizDetail.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+    return UploadResult.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
   }
 
   Future<SubmissionSummary> submitQuiz(int quizId, List<SubmittedAnswer> answers) async {
@@ -543,6 +682,17 @@ class QuizApi {
     );
     _throwIfFailed(response);
     return SubmissionSummary.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+  }
+
+  Future<QuestionCheckResult> submitQuestion(int questionId, String answer) async {
+    final response = await http.post(
+      _uri("/questions/$questionId/submit"),
+      headers: const <String, String>{"Content-Type": "application/json"},
+      body: jsonEncode(<String, dynamic>{"answer": answer}),
+    );
+    _throwIfFailed(response);
+    final payload = jsonDecode(response.body) as Map<String, dynamic>;
+    return QuestionCheckResult.fromJson(payload["result"] as Map<String, dynamic>);
   }
 
   void _throwIfFailed(http.Response response) {
@@ -578,6 +728,26 @@ class QuizSummary {
       courseName: json["course_name"] as String? ?? "Unknown Course",
       questionCount: json["question_count"] as int? ?? 0,
     );
+  }
+}
+
+class UploadResult {
+  UploadResult({required this.primaryQuizId});
+
+  final int primaryQuizId;
+
+  factory UploadResult.fromJson(Map<String, dynamic> json) {
+    if (json.containsKey("id")) {
+      return UploadResult(primaryQuizId: json["id"] as int);
+    }
+
+    final quizzes = json["quizzes"] as List<dynamic>? ?? <dynamic>[];
+    if (quizzes.isNotEmpty) {
+      final firstQuiz = quizzes.first as Map<String, dynamic>;
+      return UploadResult(primaryQuizId: firstQuiz["id"] as int);
+    }
+
+    throw Exception("Upload completed but no quiz was returned.");
   }
 }
 
@@ -660,7 +830,7 @@ class SubmissionSummary {
   final int score;
   final int totalQuestions;
   final double percentage;
-  final List<SubmissionResult> results;
+  final List<QuestionCheckResult> results;
 
   factory SubmissionSummary.fromJson(Map<String, dynamic> json) {
     final summary = json["summary"] as Map<String, dynamic>;
@@ -670,29 +840,47 @@ class SubmissionSummary {
       totalQuestions: summary["total_questions"] as int? ?? 0,
       percentage: (summary["percentage"] as num?)?.toDouble() ?? 0,
       results: resultsJson
-          .map((item) => SubmissionResult.fromJson(item as Map<String, dynamic>))
+          .map((item) => QuestionCheckResult.fromJson(item as Map<String, dynamic>))
           .toList(),
     );
   }
 }
 
-class SubmissionResult {
-  SubmissionResult({
+class QuestionCheckResult {
+  QuestionCheckResult({
+    required this.questionId,
     required this.questionNumber,
     required this.questionType,
+    required this.questionText,
+    required this.studentAnswer,
+    required this.correctAnswer,
+    required this.hasCorrectAnswer,
+    required this.isCorrect,
     required this.status,
     required this.explanation,
   });
 
+  final int questionId;
   final int questionNumber;
   final String questionType;
+  final String questionText;
+  final String studentAnswer;
+  final String correctAnswer;
+  final bool hasCorrectAnswer;
+  final bool isCorrect;
   final String status;
   final String explanation;
 
-  factory SubmissionResult.fromJson(Map<String, dynamic> json) {
-    return SubmissionResult(
+  factory QuestionCheckResult.fromJson(Map<String, dynamic> json) {
+    return QuestionCheckResult(
+      questionId: json["question_id"] as int? ?? 0,
       questionNumber: json["question_number"] as int? ?? 0,
       questionType: json["question_type"] as String? ?? "SAQ",
+      questionText: json["question_text"] as String? ?? "",
+      studentAnswer: json["student_answer"] as String? ?? "",
+      correctAnswer: json["correct_answer"] as String? ?? "",
+      hasCorrectAnswer: json["has_correct_answer"] as bool? ?? false,
+      isCorrect: json["is_correct"] as bool? ?? false,
       status: json["status"] as String? ?? "incorrect",
       explanation: json["explanation"] as String? ?? "",
     );

@@ -1,22 +1,23 @@
 """
 PDF Parser — Extracts exam questions from PDFs using PyMuPDF + Google Gemini AI.
 
-Supports three question types:
-  - MCQ (Multiple Choice Questions) with options (a)(b)(c)(d)
-  - SAQ (Short Answer Questions) with fill-in-the-blank
-  - SEQ (Short Essay Questions)
+The parser first segments a paper by topic headings such as:
+FOUNDATION: BUSINESS LAW
+FOUNDATION: ECONOMICS
 
-The parser batches large PDFs before sending them to Gemini, then merges the
-partial results into one normalized quiz payload.
+Each topic is then parsed independently so completed topics can be stored as
+individual quizzes while later topics are still processing.
 """
 
 import json
 import logging
 import os
+import re
 from collections import OrderedDict
 
 import fitz  # PyMuPDF
 import google.generativeai as genai
+from google.api_core.exceptions import DeadlineExceeded
 
 from config import Config
 
@@ -24,54 +25,59 @@ logger = logging.getLogger(__name__)
 
 _gemini_configured = False
 
-
 SECTION_ORDER = {"MCQ": 0, "SAQ": 1, "SEQ": 2}
+TOPIC_HEADING_RE = re.compile(r"FOUNDATION\s*:\s*([^\n]+)", re.IGNORECASE)
 
-PARSE_PROMPT = """You are an expert exam paper parser. Analyze the following text extracted from a university/college exam PDF and return structured JSON.
+PARSE_PROMPT_TEMPLATE = """You are an expert exam paper parser.
 
-The PDF may contain one or more of these sections:
-1. MCQ (Multiple Choice Questions) — numbered questions with options labeled (a), (b), (c), (d). Answers may appear in a solution section, answer key, or may need to be inferred from the question.
-2. SAQ (Short Answer Questions) — fill-in-the-blank or short questions. Answers may appear in a solution section or may need to be inferred.
-3. SEQ (Short Essay-Type Questions) — longer questions requiring brief essay answers. Answers may appear in a solution section or may need to be inferred.
+This chunk belongs to the topic/course: {topic_name}
 
-Return ONLY valid JSON (no markdown, no code fences) in this exact format:
-{
-  "course_name": "The detected course name",
-  "quiz_title": "A descriptive title for the quiz",
+Common structure for this paper:
+- FOUNDATION: {{Topic Name}}
+- MCQ or MULTIPLE CHOICE QUESTIONS
+- SOLUTION TO MCQ
+- SHORT ANSWER QUESTIONS (SAQ) or SEQ
+- SOLUTION TO SAQ or SOLUTION TO SEQ
+
+Analyze the text chunk and return structured JSON.
+
+Return ONLY valid JSON in this format:
+{{
+  "course_name": "{topic_name}",
+  "quiz_title": "A descriptive title for this topic quiz",
   "sections": [
-    {
+    {{
       "type": "MCQ",
       "label": "SECTION A",
       "questions": [
-        {
+        {{
           "number": 1,
           "text": "Question text",
-          "options": {
+          "options": {{
             "a": "Option A",
             "b": "Option B",
             "c": "Option C",
             "d": "Option D"
-          },
+          }},
           "correct_answer": "A",
           "answer_source": "explicit_solution"
-        }
+        }}
       ]
-    }
+    }}
   ]
-}
+}}
 
-IMPORTANT RULES:
-- Include every question detected in this chunk.
-- If an explicit solution/answer key is present, use it and set answer_source to explicit_solution.
-- If the document does not include an explicit answer but the answer can be confidently inferred from the question, set correct_answer using best effort and set answer_source to ai_inferred.
-- If no reliable answer can be determined, set correct_answer to an empty string and answer_source to unknown.
+Rules:
+- Keep this chunk scoped to the topic {topic_name}.
+- Prefer answers from explicit solution blocks.
+- If no explicit solution exists but an answer can be inferred confidently, use it and set answer_source to ai_inferred.
+- If no reliable answer exists, set correct_answer to an empty string and answer_source to unknown.
 - For MCQ, correct_answer must be A/B/C/D when available.
-- For SAQ/SEQ, correct_answer should be the answer text when available.
-- Preserve numbering and section labels where possible.
-- Clean PDF artefacts.
-- If the course name cannot be detected, use Unknown Course.
+- For SAQ/SEQ, correct_answer should be answer text when available.
+- If section labels are missing, infer them from the nearest heading.
+- Ignore unrelated noise.
 
-Here is the extracted PDF text chunk:
+Text chunk:
 
 """
 
@@ -94,7 +100,6 @@ Return ONLY valid JSON (no markdown, no code fences):
 
 
 def _ensure_gemini():
-    """Lazily configure the Gemini client."""
     global _gemini_configured
     if not _gemini_configured:
         api_key = Config.GEMINI_API_KEY
@@ -109,13 +114,11 @@ def _ensure_gemini():
 
 
 def extract_pages_from_pdf(pdf_path: str) -> list[str]:
-    """Extract PDF text page by page using PyMuPDF."""
     doc = fitz.open(pdf_path)
     pages = []
     for page_num in range(len(doc)):
         page = doc[page_num]
-        text = page.get_text("text")
-        pages.append(text.strip())
+        pages.append(page.get_text("text").strip())
     doc.close()
     logger.info(
         "Extracted %d pages from %s",
@@ -127,31 +130,72 @@ def extract_pages_from_pdf(pdf_path: str) -> list[str]:
 
 
 def extract_text_from_pdf(pdf_path: str) -> str:
-    """Extract all text from a PDF file using PyMuPDF."""
     return "\n\n--- PAGE BREAK ---\n\n".join(extract_pages_from_pdf(pdf_path))
 
 
 
-def _build_batches(pages: list[str], max_chars: int) -> list[str]:
-    """Combine pages into bounded prompt batches."""
+def _join_pages(pages: list[str]) -> str:
+    return "\n\n".join(
+        f"--- PAGE {index} ---\n{page.strip() or '[EMPTY PAGE]'}"
+        for index, page in enumerate(pages, start=1)
+    )
+
+
+
+def extract_topic_segments_from_pdf(pdf_path: str) -> list[dict]:
+    pages = extract_pages_from_pdf(pdf_path)
+    full_text = _join_pages(pages)
+    matches = list(TOPIC_HEADING_RE.finditer(full_text))
+
+    if not matches:
+        return [
+            {
+                "topic_name": "Unknown Course",
+                "text": full_text,
+            }
+        ]
+
+    topics = []
+    for index, match in enumerate(matches):
+        topic_name = match.group(1).strip()
+        start = match.start()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(full_text)
+        topic_text = full_text[start:end].strip()
+        if not topic_text:
+            continue
+        topics.append(
+            {
+                "topic_name": topic_name,
+                "text": topic_text,
+            }
+        )
+
+    logger.info("Detected %d topic segments", len(topics))
+    return topics
+
+
+
+def _build_batches_from_text(text: str, max_chars: int) -> list[str]:
+    page_marker = re.compile(r"(?=--- PAGE \d+ ---)")
+    parts = [part.strip() for part in page_marker.split(text) if part.strip()]
+    if not parts:
+        return [text]
+
     batches = []
-    current_pages = []
+    current_parts = []
     current_len = 0
 
-    for index, page_text in enumerate(pages, start=1):
-        normalized = page_text.strip() or "[EMPTY PAGE]"
-        page_block = f"--- PAGE {index} ---\n{normalized}"
-
-        if current_pages and current_len + len(page_block) > max_chars:
-            batches.append("\n\n".join(current_pages))
-            current_pages = []
+    for part in parts:
+        if current_parts and current_len + len(part) > max_chars:
+            batches.append("\n\n".join(current_parts))
+            current_parts = []
             current_len = 0
 
-        current_pages.append(page_block)
-        current_len += len(page_block)
+        current_parts.append(part)
+        current_len += len(part)
 
-    if current_pages:
-        batches.append("\n\n".join(current_pages))
+    if current_parts:
+        batches.append("\n\n".join(current_parts))
 
     return batches
 
@@ -168,32 +212,234 @@ def _build_model():
 
 
 
-def _parse_batch(model, batch_text: str, batch_number: int, total_batches: int) -> dict:
-    prompt = PARSE_PROMPT + batch_text
-    logger.info(
-        "Sending batch %d/%d to Gemini (%d chars)",
-        batch_number,
-        total_batches,
-        len(prompt),
-    )
-    response = model.generate_content(prompt)
+def _empty_parse_result(topic_name: str = "Unknown Course") -> dict:
+    return {
+        "course_name": topic_name,
+        "quiz_title": f"{topic_name} Quiz",
+        "sections": [],
+    }
 
-    try:
-        result = json.loads(response.text)
-    except json.JSONDecodeError as exc:
-        logger.error("Gemini returned invalid JSON for batch %d: %s", batch_number, response.text[:500])
-        raise ValueError(f"AI returned invalid JSON for batch {batch_number}: {exc}") from exc
+
+
+def _extract_json_payload(raw_text: str):
+    raw_text = raw_text.strip()
+    if not raw_text:
+        raise json.JSONDecodeError("empty response", raw_text, 0)
+
+    decoder = json.JSONDecoder()
+    for start_char in ("{", "["):
+        start_index = raw_text.find(start_char)
+        if start_index == -1:
+            continue
+        try:
+            payload, _ = decoder.raw_decode(raw_text[start_index:])
+            return payload
+        except json.JSONDecodeError:
+            continue
+
+    return json.loads(raw_text)
+
+
+
+def _split_batch_text(batch_text: str) -> list[str]:
+    page_marker = "--- PAGE "
+    positions = []
+    search_from = 0
+    while True:
+        position = batch_text.find(page_marker, search_from)
+        if position == -1:
+            break
+        positions.append(position)
+        search_from = position + len(page_marker)
+
+    if len(positions) > 1:
+        midpoint = len(positions) // 2
+        split_index = positions[midpoint]
+        left = batch_text[:split_index].strip()
+        right = batch_text[split_index:].strip()
+        return [part for part in (left, right) if part]
+
+    midpoint = len(batch_text) // 2
+    if midpoint <= 0 or midpoint >= len(batch_text):
+        return [batch_text]
+
+    left = batch_text[:midpoint].strip()
+    right = batch_text[midpoint:].strip()
+    return [part for part in (left, right) if part]
+
+
+
+def _normalize_batch_result(result, topic_name: str, batch_number: int) -> dict:
+    if isinstance(result, list):
+        logger.warning(
+            "Batch %d returned a top-level list; normalizing it",
+            batch_number,
+        )
+        if all(isinstance(item, dict) and "questions" in item for item in result):
+            result = {
+                "course_name": topic_name,
+                "quiz_title": f"{topic_name} Quiz",
+                "sections": result,
+            }
+        elif all(isinstance(item, dict) for item in result):
+            result = {
+                "course_name": topic_name,
+                "quiz_title": f"{topic_name} Quiz",
+                "sections": [
+                    {
+                        "type": "",
+                        "label": "",
+                        "questions": result,
+                    }
+                ],
+            }
+        else:
+            result = _empty_parse_result(topic_name)
+
+    if not isinstance(result, dict):
+        logger.warning(
+            "Batch %d returned unsupported JSON type %s; continuing with empty sections",
+            batch_number,
+            type(result).__name__,
+        )
+        result = _empty_parse_result(topic_name)
 
     if "sections" not in result:
-        raise ValueError(f"AI response missing 'sections' key for batch {batch_number}")
+        logger.warning(
+            "Batch %d returned no sections key; continuing with empty sections",
+            batch_number,
+        )
+        result["sections"] = []
 
+    result.setdefault("course_name", topic_name)
+    result.setdefault("quiz_title", f"{topic_name} Quiz")
     return result
 
 
 
+def _parse_batch(model, topic_name: str, batch_text: str, batch_number: int, total_batches: int) -> dict:
+    prompt = PARSE_PROMPT_TEMPLATE.format(topic_name=topic_name) + batch_text
+    logger.info(
+        "Sending topic '%s' batch %d/%d to Gemini (%d chars)",
+        topic_name,
+        batch_number,
+        total_batches,
+        len(prompt),
+    )
+
+    try:
+        response = model.generate_content(
+            prompt,
+            request_options={"timeout": Config.GEMINI_REQUEST_TIMEOUT},
+        )
+    except DeadlineExceeded:
+        logger.warning(
+            "Gemini timed out on topic '%s' batch %d after %ss",
+            topic_name,
+            batch_number,
+            Config.GEMINI_REQUEST_TIMEOUT,
+        )
+        split_parts = _split_batch_text(batch_text)
+        if len(split_parts) > 1:
+            sub_results = [
+                _parse_batch(model, topic_name, part, (batch_number * 10) + index, total_batches)
+                for index, part in enumerate(split_parts, start=1)
+            ]
+            return _merge_batch_results(sub_results, topic_name)
+        return _empty_parse_result(topic_name)
+
+    try:
+        result = _extract_json_payload(response.text)
+    except json.JSONDecodeError:
+        logger.warning(
+            "Gemini returned invalid JSON for topic '%s' batch %d: %s",
+            topic_name,
+            batch_number,
+            response.text[:500],
+        )
+        split_parts = _split_batch_text(batch_text)
+        if len(split_parts) > 1:
+            sub_results = [
+                _parse_batch(model, topic_name, part, (batch_number * 10) + index, total_batches)
+                for index, part in enumerate(split_parts, start=1)
+            ]
+            return _merge_batch_results(sub_results, topic_name)
+        return _empty_parse_result(topic_name)
+
+    return _normalize_batch_result(result, topic_name, batch_number)
+
+
+
+def _infer_section_type(section: dict, questions: list[dict]) -> str:
+    raw_type = str(section.get("type") or "").strip().upper()
+    if raw_type in SECTION_ORDER:
+        return raw_type
+
+    label = str(section.get("label") or "").strip().upper()
+    if "MCQ" in label or "MULTIPLE CHOICE" in label:
+        return "MCQ"
+    if "SAQ" in label or "SHORT ANSWER" in label:
+        return "SAQ"
+    if "SEQ" in label or "ESSAY" in label or "SECTION B" in label:
+        return "SEQ"
+
+    mcq_like = 0
+    text_like = 0
+    for question in questions:
+        options = question.get("options") or {}
+        if any(options.get(key) for key in ("a", "b", "c", "d")):
+            mcq_like += 1
+        elif str(question.get("text") or "").strip():
+            text_like += 1
+
+    if mcq_like:
+        return "MCQ"
+    if text_like:
+        return "SAQ"
+    return "UNKNOWN"
+
+
+
+def _normalize_section(section: dict) -> dict | None:
+    raw_questions = section.get("questions")
+    if not isinstance(raw_questions, list):
+        return None
+
+    questions = [item for item in raw_questions if isinstance(item, dict)]
+    if not questions:
+        return None
+
+    section_type = _infer_section_type(section, questions)
+    if section_type == "UNKNOWN":
+        return None
+
+    raw_label = str(section.get("label") or "").strip()
+    if raw_label:
+        section_label = raw_label
+    else:
+        default_labels = {
+            "MCQ": "MULTIPLE CHOICE QUESTIONS (MCQ)",
+            "SAQ": "SHORT ANSWER QUESTIONS (SAQ)",
+            "SEQ": "SECTION B / SEQ",
+        }
+        section_label = default_labels.get(section_type, section_type)
+
+    return {
+        "type": section_type,
+        "label": section_label,
+        "questions": questions,
+    }
+
+
+
 def _normalize_question(section_type: str, question: dict) -> dict:
+    try:
+        number = int(question.get("number", 0))
+    except (TypeError, ValueError):
+        number = 0
+
     normalized = {
-        "number": int(question.get("number", 0)),
+        "number": number,
         "text": str(question.get("text") or "").strip(),
         "correct_answer": str(question.get("correct_answer") or "").strip(),
         "answer_source": str(question.get("answer_source") or "unknown").strip() or "unknown",
@@ -212,34 +458,49 @@ def _normalize_question(section_type: str, question: dict) -> dict:
 
 
 
+def _is_usable_question(question: dict) -> bool:
+    if question["number"] <= 0:
+        return False
+    if question["text"]:
+        return True
+    options = question.get("options") or {}
+    return any(str(value or "").strip() for value in options.values())
+
+
+
 def _question_rank(question: dict) -> tuple[int, int]:
-    source = question.get("answer_source", "unknown")
     source_rank = {
         "explicit_solution": 2,
         "ai_inferred": 1,
         "unknown": 0,
-    }.get(source, 0)
+    }.get(question.get("answer_source", "unknown"), 0)
     answer_rank = 1 if question.get("correct_answer") else 0
     return source_rank, answer_rank
 
 
 
-def _merge_batch_results(batch_results: list[dict]) -> dict:
-    course_name = "Unknown Course"
-    quiz_title = "Untitled Quiz"
+def _merge_batch_results(batch_results: list[dict], topic_name: str = "Unknown Course") -> dict:
+    course_name = topic_name
+    quiz_title = f"{topic_name} Quiz"
     merged_sections: dict[tuple[str, str], dict] = OrderedDict()
 
     for result in batch_results:
         candidate_course = str(result.get("course_name") or "").strip()
         candidate_title = str(result.get("quiz_title") or "").strip()
-        if candidate_course and course_name == "Unknown Course":
+        if candidate_course and course_name == topic_name:
             course_name = candidate_course
-        if candidate_title and quiz_title == "Untitled Quiz":
+        if candidate_title and quiz_title == f"{topic_name} Quiz":
             quiz_title = candidate_title
 
-        for section in result.get("sections", []):
-            section_type = str(section.get("type") or "").upper()
-            section_label = str(section.get("label") or section_type).strip() or section_type
+        for raw_section in result.get("sections", []):
+            if not isinstance(raw_section, dict):
+                continue
+            section = _normalize_section(raw_section)
+            if section is None:
+                continue
+
+            section_type = section["type"]
+            section_label = section["label"]
             section_key = (section_type, section_label)
             merged_section = merged_sections.setdefault(
                 section_key,
@@ -252,9 +513,10 @@ def _merge_batch_results(batch_results: list[dict]) -> dict:
 
             for question in section.get("questions", []):
                 normalized = _normalize_question(section_type, question)
+                if not _is_usable_question(normalized):
+                    continue
                 question_key = normalized["number"]
                 existing = merged_section["questions"].get(question_key)
-
                 if existing is None:
                     merged_section["questions"][question_key] = normalized
                     continue
@@ -277,15 +539,11 @@ def _merge_batch_results(batch_results: list[dict]) -> dict:
         merged_sections.values(),
         key=lambda item: (SECTION_ORDER.get(item["type"], 99), item["label"]),
     ):
-        questions = sorted(
-            section["questions"].values(),
-            key=lambda item: item["number"],
-        )
         sections.append(
             {
                 "type": section["type"],
                 "label": section["label"],
-                "questions": questions,
+                "questions": sorted(section["questions"].values(), key=lambda item: item["number"]),
             }
         )
 
@@ -297,66 +555,62 @@ def _merge_batch_results(batch_results: list[dict]) -> dict:
 
 
 
-def parse_pdf_with_ai(pdf_path: str) -> dict:
-    """Parse a PDF exam paper using batched Gemini requests."""
+def parse_topic_with_ai(topic_name: str, topic_text: str) -> dict:
     _ensure_gemini()
+    if not topic_text.strip():
+        return _empty_parse_result(topic_name)
 
-    pages = extract_pages_from_pdf(pdf_path)
-    if not any(page.strip() for page in pages):
-        raise ValueError("PDF appears to be empty or image-only (no extractable text)")
-
-    batches = _build_batches(pages, Config.GEMINI_PARSE_BATCH_CHARS)
+    batches = _build_batches_from_text(topic_text, Config.GEMINI_PARSE_BATCH_CHARS)
     model = _build_model()
     batch_results = [
-        _parse_batch(model, batch_text, index, len(batches))
+        _parse_batch(model, topic_name, batch_text, index, len(batches))
         for index, batch_text in enumerate(batches, start=1)
     ]
-    result = _merge_batch_results(batch_results)
-
-    total_questions = sum(
-        len(section.get("questions", []))
-        for section in result.get("sections", [])
-    )
-    explicit_answers = sum(
-        1
-        for section in result.get("sections", [])
-        for question in section.get("questions", [])
-        if question.get("answer_source") == "explicit_solution"
-    )
-    inferred_answers = sum(
-        1
-        for section in result.get("sections", [])
-        for question in section.get("questions", [])
-        if question.get("answer_source") == "ai_inferred"
-    )
-
+    result = _merge_batch_results(batch_results, topic_name)
     logger.info(
-        "Parsed: course='%s', title='%s', %d batches, %d questions, explicit=%d, inferred=%d",
-        result.get("course_name", "Unknown"),
-        result.get("quiz_title", "Untitled"),
-        len(batches),
-        total_questions,
-        explicit_answers,
-        inferred_answers,
+        "Parsed topic '%s' into %d sections and %d questions",
+        topic_name,
+        len(result.get("sections", [])),
+        sum(len(section.get("questions", [])) for section in result.get("sections", [])),
     )
-
     return result
 
 
 
-def grade_answer_with_ai(
-    question_text: str, correct_answer: str, student_answer: str
-) -> dict:
-    """Use Gemini AI to evaluate a student's text answer."""
-    _ensure_gemini()
+def parse_pdf_topics_with_ai(pdf_path: str) -> list[dict]:
+    topics = extract_topic_segments_from_pdf(pdf_path)
+    parsed_topics = []
+    for topic in topics:
+        parsed_topics.append(
+            parse_topic_with_ai(
+                topic_name=topic["topic_name"],
+                topic_text=topic["text"],
+            )
+        )
+    return parsed_topics
 
+
+
+def parse_pdf_with_ai(pdf_path: str) -> dict:
+    parsed_topics = parse_pdf_topics_with_ai(pdf_path)
+    if not parsed_topics:
+        return _empty_parse_result()
+    return parsed_topics[0]
+
+
+
+def grade_answer_with_ai(question_text: str, correct_answer: str, student_answer: str) -> dict:
+    _ensure_gemini()
     model = _build_model()
     prompt = GRADE_PROMPT.format(
         question=question_text,
         correct_answer=correct_answer,
         student_answer=student_answer,
     )
-    response = model.generate_content(prompt)
+    response = model.generate_content(
+        prompt,
+        request_options={"timeout": Config.GEMINI_REQUEST_TIMEOUT},
+    )
 
     try:
         result = json.loads(response.text)

@@ -1,6 +1,8 @@
 import logging
 import os
+import threading
 from pathlib import Path
+from uuid import uuid4
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
@@ -8,9 +10,16 @@ from werkzeug.utils import secure_filename
 
 from config import Config
 from models import Course, Question, Quiz, Submission, SubmissionAnswer, db
-from pdf_parser import grade_answer_with_ai, parse_pdf_with_ai
+from pdf_parser import (
+    extract_topic_segments_from_pdf,
+    grade_answer_with_ai,
+    parse_pdf_with_ai,
+    parse_topic_with_ai,
+)
 
 ALLOWED_EXTENSIONS = {"pdf"}
+PROCESSING_JOBS: dict[str, dict] = {}
+PROCESSING_LOCK = threading.Lock()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,6 +35,7 @@ def create_app() -> Flask:
     CORS(app)
     db.init_app(app)
 
+    Path(app.instance_path).mkdir(parents=True, exist_ok=True)
     upload_dir = Path(app.config["UPLOAD_FOLDER"])
     upload_dir.mkdir(parents=True, exist_ok=True)
 
@@ -34,6 +44,7 @@ def create_app() -> Flask:
 
     register_routes(app)
     return app
+
 
 
 def register_routes(app: Flask) -> None:
@@ -56,6 +67,14 @@ def register_routes(app: Flask) -> None:
         quiz = Quiz.query.get_or_404(quiz_id)
         return jsonify(quiz.to_dict(include_questions=True))
 
+    @app.get("/api/uploads/<job_id>")
+    def get_upload_job(job_id: str):
+        with PROCESSING_LOCK:
+            job = PROCESSING_JOBS.get(job_id)
+        if job is None:
+            return jsonify({"error": "Upload job not found"}), 404
+        return jsonify(job)
+
     @app.post("/api/upload")
     def upload_pdf():
         if "file" not in request.files:
@@ -72,14 +91,35 @@ def register_routes(app: Flask) -> None:
         destination = Path(app.config["UPLOAD_FOLDER"]) / filename
         file.save(destination)
 
+        async_requested = str(request.form.get("async", "false")).lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+
+        if async_requested:
+            topic_segments = extract_topic_segments_from_pdf(str(destination))
+            job_id = uuid4().hex
+            _create_upload_job(job_id, filename, topic_segments)
+            thread = threading.Thread(
+                target=_process_upload_job,
+                args=(app, job_id, str(destination), filename, topic_segments),
+                daemon=True,
+            )
+            thread.start()
+            return jsonify({"job_id": job_id, "status": "processing"}), 202
+
         try:
-            parsed = parse_pdf_with_ai(str(destination))
-            quiz = _store_parsed_quiz(filename=filename, parsed=parsed)
-        except Exception as exc:  # pragma: no cover - defensive API guard
+            topic_segments = extract_topic_segments_from_pdf(str(destination))
+            created_quizzes = _process_topic_segments(filename, topic_segments)
+        except Exception as exc:  # pragma: no cover
             logger.exception("Failed to parse uploaded PDF")
             return jsonify({"error": str(exc)}), 500
 
-        return jsonify(quiz.to_dict(include_questions=True)), 201
+        if len(created_quizzes) == 1:
+            return jsonify(created_quizzes[0]), 201
+
+        return jsonify({"quizzes": created_quizzes, "count": len(created_quizzes)}), 201
 
     @app.post("/api/quizzes/<int:quiz_id>/submit")
     def submit_quiz(quiz_id: int):
@@ -106,31 +146,20 @@ def register_routes(app: Flask) -> None:
 
         for question in sorted(quiz.questions, key=lambda q: q.question_number):
             student_answer = answers_by_question.get(question.id, "")
-            grading = _grade_question(question, student_answer)
-            if grading["is_correct"]:
+            result = _build_question_result(question, student_answer)
+            if result["is_correct"]:
                 score += 1
 
             submission_answer = SubmissionAnswer(
                 submission=submission,
                 question=question,
                 student_answer=student_answer,
-                is_correct=grading["is_correct"],
-                status=grading["status"],
-                explanation=grading.get("explanation", ""),
+                is_correct=result["is_correct"],
+                status=result["status"],
+                explanation=result.get("explanation", ""),
             )
             db.session.add(submission_answer)
-
-            results.append(
-                {
-                    "question_id": question.id,
-                    "question_number": question.question_number,
-                    "question_type": question.question_type,
-                    "student_answer": student_answer,
-                    "is_correct": grading["is_correct"],
-                    "status": grading["status"],
-                    "explanation": grading.get("explanation", ""),
-                }
-            )
+            results.append(result)
 
         submission.score = score
         db.session.commit()
@@ -149,9 +178,36 @@ def register_routes(app: Flask) -> None:
             }
         )
 
+    @app.post("/api/questions/<int:question_id>/submit")
+    def submit_single_question(question_id: int):
+        question = Question.query.get_or_404(question_id)
+        payload = request.get_json(silent=True) or {}
+        student_answer = str(payload.get("answer", "")).strip()
+        return jsonify({"quiz_id": question.quiz_id, "result": _build_question_result(question, student_answer)})
+
+
 
 def _allowed_file(filename: str) -> bool:
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+
+def _build_question_result(question: Question, student_answer: str) -> dict:
+    correct_answer = question.correct_answer.strip()
+    grading = _grade_question(question, student_answer)
+    return {
+        "question_id": question.id,
+        "question_number": question.question_number,
+        "question_type": question.question_type,
+        "question_text": question.question_text,
+        "student_answer": student_answer,
+        "correct_answer": correct_answer,
+        "has_correct_answer": bool(correct_answer),
+        "is_correct": grading["is_correct"],
+        "status": grading["status"],
+        "explanation": grading.get("explanation", ""),
+    }
+
 
 
 def _store_parsed_quiz(filename: str, parsed: dict) -> Quiz:
@@ -171,14 +227,20 @@ def _store_parsed_quiz(filename: str, parsed: dict) -> Quiz:
     for section in parsed.get("sections", []):
         question_type = str(section.get("type", "")).upper()
         label = section.get("label")
+        if question_type not in {"MCQ", "SAQ", "SEQ"}:
+            continue
         for question_data in section.get("questions", []):
+            question_number = int(question_data.get("number", 0))
+            question_text = (question_data.get("text") or "").strip()
+            if question_number <= 0 or not question_text:
+                continue
             options = question_data.get("options") or {}
             question = Question(
                 quiz=quiz,
                 question_type=question_type,
                 section_label=label,
-                question_number=int(question_data.get("number", 0)),
-                question_text=(question_data.get("text") or "").strip(),
+                question_number=question_number,
+                question_text=question_text,
                 option_a=options.get("a"),
                 option_b=options.get("b"),
                 option_c=options.get("c"),
@@ -189,6 +251,82 @@ def _store_parsed_quiz(filename: str, parsed: dict) -> Quiz:
 
     db.session.commit()
     return quiz
+
+
+
+def _process_topic_segments(filename: str, topic_segments: list[dict]) -> list[dict]:
+    created_quizzes = []
+    for topic in topic_segments:
+        parsed_topic = parse_topic_with_ai(
+            topic_name=topic["topic_name"],
+            topic_text=topic["text"],
+        )
+        quiz = _store_parsed_quiz(filename=filename, parsed=parsed_topic)
+        created_quizzes.append(quiz.to_dict(include_questions=True))
+    return created_quizzes
+
+
+
+def _create_upload_job(job_id: str, filename: str, topic_segments: list[dict]) -> None:
+    with PROCESSING_LOCK:
+        PROCESSING_JOBS[job_id] = {
+            "job_id": job_id,
+            "filename": filename,
+            "status": "processing",
+            "total_topics": len(topic_segments),
+            "completed_topics": 0,
+            "topics": [topic["topic_name"] for topic in topic_segments],
+            "quizzes": [],
+            "errors": [],
+        }
+
+
+
+def _update_upload_job(job_id: str, **updates) -> None:
+    with PROCESSING_LOCK:
+        job = PROCESSING_JOBS.get(job_id)
+        if job is not None:
+            job.update(updates)
+
+
+
+def _append_upload_job_quiz(job_id: str, quiz_data: dict) -> None:
+    with PROCESSING_LOCK:
+        job = PROCESSING_JOBS.get(job_id)
+        if job is not None:
+            job["quizzes"].append(quiz_data)
+            job["completed_topics"] += 1
+
+
+
+def _append_upload_job_error(job_id: str, topic_name: str, error: str) -> None:
+    with PROCESSING_LOCK:
+        job = PROCESSING_JOBS.get(job_id)
+        if job is not None:
+            job["errors"].append({"topic": topic_name, "error": error})
+
+
+
+def _process_upload_job(app: Flask, job_id: str, pdf_path: str, filename: str, topic_segments: list[dict]) -> None:
+    with app.app_context():
+        try:
+            for topic in topic_segments:
+                try:
+                    parsed_topic = parse_topic_with_ai(
+                        topic_name=topic["topic_name"],
+                        topic_text=topic["text"],
+                    )
+                    quiz = _store_parsed_quiz(filename=filename, parsed=parsed_topic)
+                    _append_upload_job_quiz(job_id, quiz.to_dict(include_questions=True))
+                except Exception as exc:  # pragma: no cover
+                    logger.exception("Failed topic '%s' in upload job %s", topic["topic_name"], job_id)
+                    _append_upload_job_error(job_id, topic["topic_name"], str(exc))
+            _update_upload_job(job_id, status="completed")
+        except Exception as exc:  # pragma: no cover
+            logger.exception("Upload job %s failed", job_id)
+            _update_upload_job(job_id, status="failed")
+            _append_upload_job_error(job_id, "job", str(exc))
+
 
 
 def _grade_question(question: Question, student_answer: str) -> dict:
@@ -209,11 +347,7 @@ def _grade_question(question: Question, student_answer: str) -> dict:
         return {
             "is_correct": is_correct,
             "status": "correct" if is_correct else "incorrect",
-            "explanation": (
-                "Matched the correct option."
-                if is_correct
-                else f"Expected option {normalized_correct}."
-            ),
+            "explanation": "Matched the correct option." if is_correct else f"Expected option {normalized_correct}.",
         }
 
     if not student_answer:
@@ -229,7 +363,7 @@ def _grade_question(question: Question, student_answer: str) -> dict:
             correct_answer=correct_answer,
             student_answer=student_answer,
         )
-    except Exception as exc:  # pragma: no cover - external dependency guard
+    except Exception as exc:  # pragma: no cover
         logger.warning("AI grading failed, falling back to exact compare: %s", exc)
         is_correct = student_answer.lower() == correct_answer.lower()
         grading = {
