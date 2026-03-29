@@ -5,7 +5,7 @@ import "package:file_selector/file_selector.dart";
 import "package:flutter/material.dart";
 import "package:http/http.dart" as http;
 
-const String defaultApiBaseUrl = "http://127.0.0.1:5000/api";
+const String defaultApiBaseUrl = "http://192.168.1.52:3000/api";
 const Duration textAnswerDebounce = Duration(milliseconds: 700);
 
 void main() {
@@ -50,8 +50,10 @@ class _QuizDashboardPageState extends State<QuizDashboardPage> {
   final Map<int, Timer> _answerDebouncers = <int, Timer>{};
   final Set<int> _checkingQuestionIds = <int>{};
 
+  List<CourseSummary> _courses = const <CourseSummary>[];
   List<QuizSummary> _quizzes = const <QuizSummary>[];
   QuizDetail? _selectedQuiz;
+  String? _selectedCourseName;
   SubmissionSummary? _submission;
   bool _loading = true;
   bool _uploading = false;
@@ -78,17 +80,33 @@ class _QuizDashboardPageState extends State<QuizDashboardPage> {
       _error = null;
     });
     try {
-      final quizzes = await _api.fetchQuizzes();
+      final results = await Future.wait<dynamic>(<Future<dynamic>>[
+        _api.fetchCourses(),
+        _api.fetchQuizzes(),
+      ]);
+      final courses = results[0] as List<CourseSummary>;
+      final quizzes = results[1] as List<QuizSummary>;
+      final nextCourseName = _resolveSelectedCourseName(
+        courses: courses,
+        quizzes: quizzes,
+        focusedQuizId: focusQuizId,
+      );
+      final filteredQuizzes = _filterQuizzesByCourse(quizzes, nextCourseName);
       QuizDetail? detail;
-      if (quizzes.isNotEmpty) {
-        final quizId = focusQuizId ?? _selectedQuiz?.id ?? quizzes.first.id;
+      if (filteredQuizzes.isNotEmpty) {
+        final quizId = _resolveSelectedQuizId(
+          quizzes: filteredQuizzes,
+          focusedQuizId: focusQuizId,
+        );
         detail = await _api.fetchQuiz(quizId);
       }
       if (!mounted) {
         return;
       }
       setState(() {
+        _courses = courses;
         _quizzes = quizzes;
+        _selectedCourseName = nextCourseName;
         _selectedQuiz = detail;
         _submission = null;
         _loading = false;
@@ -103,6 +121,71 @@ class _QuizDashboardPageState extends State<QuizDashboardPage> {
         _loading = false;
       });
     }
+  }
+
+  List<QuizSummary> _filterQuizzesByCourse(
+    List<QuizSummary> quizzes,
+    String? courseName,
+  ) {
+    if (courseName == null || courseName.isEmpty) {
+      return quizzes;
+    }
+    return quizzes.where((quiz) => quiz.courseName == courseName).toList();
+  }
+
+  String? _resolveSelectedCourseName({
+    required List<CourseSummary> courses,
+    required List<QuizSummary> quizzes,
+    int? focusedQuizId,
+  }) {
+    if (courses.isEmpty) {
+      return null;
+    }
+
+    if (focusedQuizId != null) {
+      QuizSummary? focusedQuiz;
+      for (final quiz in quizzes) {
+        if (quiz.id == focusedQuizId) {
+          focusedQuiz = quiz;
+          break;
+        }
+      }
+      if (focusedQuiz != null) {
+        return focusedQuiz.courseName;
+      }
+    }
+
+    final currentCourse = _selectedCourseName;
+    if (currentCourse != null &&
+        courses.any((course) => course.name == currentCourse)) {
+      return currentCourse;
+    }
+
+    final selectedQuiz = _selectedQuiz;
+    if (selectedQuiz != null &&
+        courses.any((course) => course.name == selectedQuiz.courseName)) {
+      return selectedQuiz.courseName;
+    }
+
+    return courses.first.name;
+  }
+
+  int _resolveSelectedQuizId({
+    required List<QuizSummary> quizzes,
+    int? focusedQuizId,
+  }) {
+    if (focusedQuizId != null &&
+        quizzes.any((quiz) => quiz.id == focusedQuizId)) {
+      return focusedQuizId;
+    }
+
+    final selectedQuizId = _selectedQuiz?.id;
+    if (selectedQuizId != null &&
+        quizzes.any((quiz) => quiz.id == selectedQuizId)) {
+      return selectedQuizId;
+    }
+
+    return quizzes.first.id;
   }
 
   void _syncAnswers({required bool clearExisting}) {
@@ -146,6 +229,28 @@ class _QuizDashboardPageState extends State<QuizDashboardPage> {
         _error = error.toString();
       });
     }
+  }
+
+  Future<void> _selectCourse(String? courseName) async {
+    if (courseName == null || courseName == _selectedCourseName) {
+      return;
+    }
+
+    final quizzesForCourse = _filterQuizzesByCourse(_quizzes, courseName);
+
+    setState(() {
+      _selectedCourseName = courseName;
+      _selectedQuiz = null;
+      _submission = null;
+      _error = null;
+      _syncAnswers(clearExisting: true);
+    });
+
+    if (quizzesForCourse.isEmpty) {
+      return;
+    }
+
+    await _selectQuiz(quizzesForCourse.first.id);
   }
 
   Future<void> _upload() async {
@@ -252,9 +357,22 @@ class _QuizDashboardPageState extends State<QuizDashboardPage> {
       return;
     }
 
+    if (question.questionType == "SAQ") {
+      _checkingQuestionIds.remove(question.id);
+      return;
+    }
+
     _answerDebouncers[question.id] = Timer(textAnswerDebounce, () {
       unawaited(_checkSingleQuestion(question.id, value));
     });
+  }
+
+  Future<void> _checkQuestion(QuestionItem question) async {
+    final answer = (_answers[question.id] ?? "").trim();
+    if (answer.isEmpty) {
+      return;
+    }
+    await _checkSingleQuestion(question.id, answer);
   }
 
   Future<void> _checkSingleQuestion(int questionId, String answer) async {
@@ -293,6 +411,7 @@ class _QuizDashboardPageState extends State<QuizDashboardPage> {
   @override
   Widget build(BuildContext context) {
     final quiz = _selectedQuiz;
+    final filteredQuizzes = _filterQuizzesByCourse(_quizzes, _selectedCourseName);
     return Scaffold(
       appBar: AppBar(
         title: const Text("PDF Quiz System"),
@@ -321,7 +440,10 @@ class _QuizDashboardPageState extends State<QuizDashboardPage> {
                 builder: (context, constraints) {
                   final wide = constraints.maxWidth > 1000;
                   final list = _QuizList(
-                    quizzes: _quizzes,
+                    courses: _courses,
+                    selectedCourseName: _selectedCourseName,
+                    onCourseChanged: _selectCourse,
+                    quizzes: filteredQuizzes,
                     selectedQuizId: quiz?.id,
                     onSelect: _selectQuiz,
                   );
@@ -333,6 +455,7 @@ class _QuizDashboardPageState extends State<QuizDashboardPage> {
                     checkingQuestionIds: _checkingQuestionIds,
                     submitting: _submitting,
                     onChange: _handleAnswerChange,
+                    onCheckQuestion: _checkQuestion,
                     onSubmit: _submit,
                   );
 
@@ -376,11 +499,17 @@ class _QuizDashboardPageState extends State<QuizDashboardPage> {
 
 class _QuizList extends StatelessWidget {
   const _QuizList({
+    required this.courses,
+    required this.selectedCourseName,
+    required this.onCourseChanged,
     required this.quizzes,
     required this.selectedQuizId,
     required this.onSelect,
   });
 
+  final List<CourseSummary> courses;
+  final String? selectedCourseName;
+  final ValueChanged<String?> onCourseChanged;
   final List<QuizSummary> quizzes;
   final int? selectedQuizId;
   final ValueChanged<int> onSelect;
@@ -398,8 +527,31 @@ class _QuizList extends StatelessWidget {
               style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800),
             ),
             const SizedBox(height: 12),
+            if (courses.isNotEmpty) ...[
+              DropdownButtonFormField<String>(
+                value: selectedCourseName,
+                decoration: const InputDecoration(
+                  labelText: "Course",
+                  border: OutlineInputBorder(),
+                ),
+                items: courses
+                    .map(
+                      (course) => DropdownMenuItem<String>(
+                        value: course.name,
+                        child: Text("${course.name} (${course.quizCount})"),
+                      ),
+                    )
+                    .toList(),
+                onChanged: onCourseChanged,
+              ),
+              const SizedBox(height: 12),
+            ],
             if (quizzes.isEmpty)
-              const Text("No quizzes yet. Upload a PDF to start."),
+              Text(
+                courses.isEmpty
+                    ? "No quizzes yet. Upload a PDF to start."
+                    : "No quizzes found for the selected course.",
+              ),
             for (final quiz in quizzes)
               Padding(
                 padding: const EdgeInsets.only(bottom: 10),
@@ -435,6 +587,7 @@ class _QuizWorkspace extends StatelessWidget {
     required this.checkingQuestionIds,
     required this.submitting,
     required this.onChange,
+    required this.onCheckQuestion,
     required this.onSubmit,
   });
 
@@ -445,6 +598,7 @@ class _QuizWorkspace extends StatelessWidget {
   final Set<int> checkingQuestionIds;
   final bool submitting;
   final void Function(QuestionItem question, String value) onChange;
+  final Future<void> Function(QuestionItem question) onCheckQuestion;
   final Future<void> Function() onSubmit;
 
   @override
@@ -506,6 +660,7 @@ class _QuizWorkspace extends StatelessWidget {
                   result: questionResults[question.id],
                   isChecking: checkingQuestionIds.contains(question.id),
                   onChanged: (value) => onChange(question, value),
+                  onCheck: () => onCheckQuestion(question),
                 ),
               ),
             Align(
@@ -536,6 +691,7 @@ class _QuestionCard extends StatelessWidget {
     required this.result,
     required this.isChecking,
     required this.onChanged,
+    required this.onCheck,
   });
 
   final QuestionItem question;
@@ -543,6 +699,7 @@ class _QuestionCard extends StatelessWidget {
   final QuestionCheckResult? result;
   final bool isChecking;
   final ValueChanged<String> onChanged;
+  final VoidCallback onCheck;
 
   @override
   Widget build(BuildContext context) {
@@ -607,15 +764,33 @@ class _QuestionCard extends StatelessWidget {
                   ),
                 )
           else
-            TextFormField(
-              initialValue: currentAnswer,
-              minLines: question.questionType == "SEQ" ? 4 : 2,
-              maxLines: question.questionType == "SEQ" ? 6 : 3,
-              onChanged: onChanged,
-              decoration: const InputDecoration(
-                border: OutlineInputBorder(),
-                hintText: "Enter your answer",
-              ),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                TextFormField(
+                  initialValue: currentAnswer,
+                  minLines: question.questionType == "SEQ" ? 4 : 2,
+                  maxLines: question.questionType == "SEQ" ? 6 : 3,
+                  onChanged: onChanged,
+                  decoration: const InputDecoration(
+                    border: OutlineInputBorder(),
+                    hintText: "Enter your answer",
+                  ),
+                ),
+                if (question.questionType == "SAQ") ...[
+                  const SizedBox(height: 10),
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: OutlinedButton.icon(
+                      onPressed: currentAnswer.trim().isEmpty || isChecking
+                          ? null
+                          : onCheck,
+                      icon: const Icon(Icons.rule),
+                      label: const Text("Check"),
+                    ),
+                  ),
+                ],
+              ],
             ),
           if (result != null) ...[
             const SizedBox(height: 12),
@@ -647,6 +822,15 @@ class QuizApi {
   final String baseUrl;
 
   Uri _uri(String path) => Uri.parse("$baseUrl$path");
+
+  Future<List<CourseSummary>> fetchCourses() async {
+    final response = await http.get(_uri("/courses"));
+    _throwIfFailed(response);
+    final data = jsonDecode(response.body) as List<dynamic>;
+    return data
+        .map((item) => CourseSummary.fromJson(item as Map<String, dynamic>))
+        .toList();
+  }
 
   Future<List<QuizSummary>> fetchQuizzes() async {
     final response = await http.get(_uri("/quizzes"));
@@ -705,6 +889,26 @@ class QuizApi {
     } catch (_) {
       throw Exception("Request failed with status ${response.statusCode}");
     }
+  }
+}
+
+class CourseSummary {
+  CourseSummary({
+    required this.id,
+    required this.name,
+    required this.quizCount,
+  });
+
+  final int id;
+  final String name;
+  final int quizCount;
+
+  factory CourseSummary.fromJson(Map<String, dynamic> json) {
+    return CourseSummary(
+      id: json["id"] as int,
+      name: json["name"] as String? ?? "Unknown Course",
+      quizCount: json["quiz_count"] as int? ?? 0,
+    );
   }
 }
 

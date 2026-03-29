@@ -3,7 +3,7 @@ services:
     build:
       context: ./backend
     ports:
-      - "5000:5000"
+      - "0.0.0.0:3000:3000"
     env_file:
       - ./backend/.env
     volumes:
