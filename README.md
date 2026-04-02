@@ -30,12 +30,26 @@ cp .env.example .env
 python app.py
 ```
 
-Backend runs on `http://127.0.0.1:5000` by default.
+Backend runs on `http://127.0.0.1:3000` by default.
+
+On Windows PowerShell you can bootstrap and run the backend with:
+
+```powershell
+cd backend
+.\start-backend-windows.ps1
+```
+
+Optional flags:
+
+- `-GeminiApiKey "your-key"`
+- `-Port 3000`
+- `-SkipInstall`
+- `-NoRun`
 
 Required env vars:
 
 - `GEMINI_API_KEY`
-- `GEMINI_MODEL` optional, defaults to `gemini-2.0-flash`
+- `GEMINI_MODEL` optional, defaults to `gemini-3-flash-preview`
 - `DATABASE_URL` optional, defaults to SQLite `quiz.db`
 
 ## Flutter Setup
@@ -45,7 +59,7 @@ flutter pub get
 flutter run -d macos
 ```
 
-The Flutter app expects the backend at `http://127.0.0.1:5000/api`.
+The Flutter app should point to the backend at `http://127.0.0.1:3000/api` unless you override the port.
 
 ## API Endpoints
 
@@ -64,11 +78,11 @@ docker compose up --build
 
 Services:
 
-- `backend`: Flask API on port `5000`
-- `flutter`: optional Flutter web/dev container on port `3000`
+- `backend`: Flask API on port `3000`
+- `flutter`: optional Flutter web/dev container on port `3001`
 
 ## Notes
 
 - SAQ/SEQ grading uses Gemini semantic evaluation with an exact-match fallback.
 - Uploaded PDFs are stored in `backend/uploads/`.
-- SQLite data persists in `backend/quiz.db` unless you override `DATABASE_URL`.
+- SQLite data persists in `backend/instance/quiz.db` unless you override `DATABASE_URL`.
