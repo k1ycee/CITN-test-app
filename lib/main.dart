@@ -7,6 +7,8 @@ import "package:http/http.dart" as http;
 
 const String defaultApiBaseUrl = "http://192.168.1.52:3000/api";
 const Duration textAnswerDebounce = Duration(milliseconds: 700);
+const Duration uploadJobPollInterval = Duration(seconds: 2);
+const Duration uploadJobTimeout = Duration(minutes: 15);
 
 void main() {
   runApp(const PdfQuizApp());
@@ -273,6 +275,9 @@ class _QuizDashboardPageState extends State<QuizDashboardPage> {
       final uploadResult = await _api.uploadPdf(file.name, bytes);
       if (!mounted) {
         return;
+      }
+      if (uploadResult.primaryQuizId == null) {
+        throw Exception("Upload completed but no quiz was returned.");
       }
       await _refresh(focusQuizId: uploadResult.primaryQuizId);
     } catch (error) {
@@ -849,11 +854,49 @@ class QuizApi {
 
   Future<UploadResult> uploadPdf(String filename, List<int> bytes) async {
     final request = http.MultipartRequest("POST", _uri("/upload"))
+      ..fields["async"] = "true"
       ..files.add(http.MultipartFile.fromBytes("file", bytes, filename: filename));
     final streamed = await request.send();
     final response = await http.Response.fromStream(streamed);
     _throwIfFailed(response);
-    return UploadResult.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+    final payload = jsonDecode(response.body) as Map<String, dynamic>;
+    final initialResult = UploadResult.fromJson(payload);
+    if (initialResult.jobId == null) {
+      return initialResult;
+    }
+    return _waitForUploadJob(initialResult.jobId!);
+  }
+
+  Future<UploadResult> _waitForUploadJob(String jobId) async {
+    final deadline = DateTime.now().add(uploadJobTimeout);
+
+    while (DateTime.now().isBefore(deadline)) {
+      final response = await http.get(_uri("/uploads/$jobId"));
+      _throwIfFailed(response);
+      final payload = jsonDecode(response.body) as Map<String, dynamic>;
+      final job = UploadJobStatus.fromJson(payload);
+
+      if (job.status == "completed") {
+        if (job.quizzes.isEmpty) {
+          throw Exception("Upload finished, but no quizzes were created.");
+        }
+        return UploadResult(
+          primaryQuizId: job.quizzes.first.id,
+          jobId: job.jobId,
+        );
+      }
+
+      if (job.status == "failed") {
+        final errorMessage = job.errors.isNotEmpty
+            ? job.errors.map((error) => error.message).join("; ")
+            : "Upload job failed.";
+        throw Exception(errorMessage);
+      }
+
+      await Future<void>.delayed(uploadJobPollInterval);
+    }
+
+    throw Exception("Upload is still processing. Try again in a moment.");
   }
 
   Future<SubmissionSummary> submitQuiz(int quizId, List<SubmittedAnswer> answers) async {
@@ -936,11 +979,19 @@ class QuizSummary {
 }
 
 class UploadResult {
-  UploadResult({required this.primaryQuizId});
+  UploadResult({required this.primaryQuizId, this.jobId});
 
-  final int primaryQuizId;
+  final int? primaryQuizId;
+  final String? jobId;
 
   factory UploadResult.fromJson(Map<String, dynamic> json) {
+    if (json.containsKey("job_id")) {
+      return UploadResult(
+        primaryQuizId: null,
+        jobId: json["job_id"] as String?,
+      );
+    }
+
     if (json.containsKey("id")) {
       return UploadResult(primaryQuizId: json["id"] as int);
     }
@@ -952,6 +1003,49 @@ class UploadResult {
     }
 
     throw Exception("Upload completed but no quiz was returned.");
+  }
+}
+
+class UploadJobStatus {
+  UploadJobStatus({
+    required this.jobId,
+    required this.status,
+    required this.quizzes,
+    required this.errors,
+  });
+
+  final String jobId;
+  final String status;
+  final List<QuizSummary> quizzes;
+  final List<UploadJobError> errors;
+
+  factory UploadJobStatus.fromJson(Map<String, dynamic> json) {
+    final quizzesJson = json["quizzes"] as List<dynamic>? ?? <dynamic>[];
+    final errorsJson = json["errors"] as List<dynamic>? ?? <dynamic>[];
+    return UploadJobStatus(
+      jobId: json["job_id"] as String? ?? "",
+      status: json["status"] as String? ?? "processing",
+      quizzes: quizzesJson
+          .map((item) => QuizSummary.fromJson(item as Map<String, dynamic>))
+          .toList(),
+      errors: errorsJson
+          .map((item) => UploadJobError.fromJson(item as Map<String, dynamic>))
+          .toList(),
+    );
+  }
+}
+
+class UploadJobError {
+  UploadJobError({required this.topic, required this.message});
+
+  final String topic;
+  final String message;
+
+  factory UploadJobError.fromJson(Map<String, dynamic> json) {
+    return UploadJobError(
+      topic: json["topic"] as String? ?? "unknown",
+      message: json["error"] as String? ?? "Unknown upload error",
+    );
   }
 }
 

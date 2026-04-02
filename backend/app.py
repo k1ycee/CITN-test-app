@@ -91,7 +91,7 @@ def register_routes(app: Flask) -> None:
         destination = Path(app.config["UPLOAD_FOLDER"]) / filename
         file.save(destination)
 
-        async_requested = str(request.form.get("async", "false")).lower() in {
+        async_requested = str(request.form.get("async", "true")).lower() in {
             "1",
             "true",
             "yes",
