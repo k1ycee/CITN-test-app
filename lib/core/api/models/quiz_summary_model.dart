@@ -1,0 +1,22 @@
+class QuizSummaryModel {
+  QuizSummaryModel({
+    required this.id,
+    required this.title,
+    required this.courseName,
+    required this.questionCount,
+  });
+
+  final int id;
+  final String title;
+  final String courseName;
+  final int questionCount;
+
+  factory QuizSummaryModel.fromJson(Map<String, dynamic> json) {
+    return QuizSummaryModel(
+      id: json["id"] as int,
+      title: json["title"] as String? ?? "Untitled Quiz",
+      courseName: json["course_name"] as String? ?? "Unknown Course",
+      questionCount: json["question_count"] as int? ?? 0,
+    );
+  }
+}
