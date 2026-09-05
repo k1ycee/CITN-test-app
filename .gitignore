@@ -43,3 +43,11 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Backend (Flask) local/generated files
+backend/.env
+backend/.venv/
+backend/instance/
+backend/uploads/
+backend/__pycache__/
+backend/.pytest_cache/
