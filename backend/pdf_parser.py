@@ -108,6 +108,20 @@ Return ONLY valid JSON (no markdown, no code fences):
 }}
 """
 
+ANSWER_KEY_PROMPT_TEMPLATE = """You are reading an answer key / solutions document for an exam.
+
+Extract the answer for every question number you can find. Return ONLY valid JSON:
+{{
+  "answers": [
+    {{"question_number": 1, "answer": "B"}},
+    {{"question_number": 2, "answer": "Because supply exceeds demand"}}
+  ]
+}}
+
+Document:
+
+"""
+
 SEGMENT_PROMPT_TEMPLATE = """You are analyzing an exam paper made of {page_count} pages, each marked with a "--- PAGE N ---" header.
 
 Identify the distinct topic or course sections in this document. A new topic usually starts with a heading naming a subject/course (e.g. "FOUNDATION: BUSINESS LAW"), but wording varies by document, so use your judgment about where one topic's questions end and the next begins.
@@ -708,3 +722,39 @@ def grade_answer_with_ai(question_text: str, correct_answer: str, student_answer
         }
 
     return result
+
+
+
+def parse_answer_key_document(pdf_path: str) -> dict[int, str]:
+    _ensure_gemini()
+    pages = extract_pages_from_pdf(pdf_path)
+    text = _join_pages(pages)
+    model = _build_model()
+    prompt = ANSWER_KEY_PROMPT_TEMPLATE + text
+
+    try:
+        response = model.generate_content(
+            prompt,
+            request_options={"timeout": Config.GEMINI_REQUEST_TIMEOUT},
+        )
+        result = _extract_json_payload(response.text)
+    except Exception:
+        logger.exception("Failed to parse answer key document")
+        return {}
+
+    if not isinstance(result, dict):
+        return {}
+
+    answers: dict[int, str] = {}
+    for item in result.get("answers", []):
+        if not isinstance(item, dict):
+            continue
+        try:
+            number = int(item.get("question_number"))
+        except (TypeError, ValueError):
+            continue
+        answer = str(item.get("answer") or "").strip()
+        if answer:
+            answers[number] = answer
+
+    return answers

@@ -13,6 +13,7 @@ from models import Course, Question, Quiz, Submission, SubmissionAnswer, db, set
 from pdf_parser import (
     extract_topic_segments_from_pdf,
     grade_answer_with_ai,
+    parse_answer_key_document,
     parse_pdf_with_ai,
     parse_topic_with_ai,
 )
@@ -211,6 +212,46 @@ def register_routes(app: Flask) -> None:
         db.session.expunge_all()
         quiz = Quiz.query.get_or_404(quiz_id)
         return jsonify({"applied": applied, "quiz": quiz.to_dict(include_questions=True)})
+
+    @app.post("/api/quizzes/<int:quiz_id>/answer-key/upload")
+    def upload_answer_key(quiz_id: int):
+        quiz = Quiz.query.get_or_404(quiz_id)
+
+        if "file" not in request.files:
+            return jsonify({"error": "Missing uploaded file under 'file'"}), 400
+
+        file = request.files["file"]
+        if not file or file.filename == "":
+            return jsonify({"error": "No file selected"}), 400
+
+        if not _allowed_file(file.filename):
+            return jsonify({"error": "Only PDF uploads are supported"}), 400
+
+        filename = secure_filename(file.filename)
+        destination = Path(app.config["UPLOAD_FOLDER"]) / f"answerkey-{uuid4().hex}-{filename}"
+        file.save(destination)
+
+        try:
+            answers_by_number = parse_answer_key_document(str(destination))
+        except Exception as exc:  # pragma: no cover
+            logger.exception("Failed to parse answer key document")
+            return jsonify({"error": str(exc)}), 500
+
+        applied = 0
+        for question in quiz.questions:
+            answer = answers_by_number.get(question.question_number)
+            if answer:
+                set_question_answer(question, answer, "user_provided")
+                applied += 1
+
+        db.session.commit()
+        return jsonify(
+            {
+                "applied": applied,
+                "unmatched": len(quiz.questions) - applied,
+                "quiz": quiz.to_dict(include_questions=True),
+            }
+        )
 
 
 
