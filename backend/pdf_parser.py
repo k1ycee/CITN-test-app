@@ -67,7 +67,8 @@ Return ONLY valid JSON in this format:
             "d": "Option D"
           }},
           "correct_answer": "A",
-          "answer_source": "explicit_solution"
+          "answer_source": "explicit_solution",
+          "confidence": 87
         }}
       ]
     }}
@@ -83,6 +84,8 @@ Rules:
 - For SAQ/SEQ, correct_answer should be answer text when available.
 - If section labels are missing, infer them from the nearest heading.
 - Ignore unrelated noise.
+- When answer_source is ai_inferred, include an integer "confidence" from 0-100 estimating how sure you are. Omit or zero it for explicit_solution.
+- Always provide your best-effort correct_answer and set answer_source to ai_inferred rather than unknown, unless the question truly cannot be answered from the given text (e.g. it depends on an image or table that isn't present).
 
 Text chunk:
 
@@ -508,11 +511,21 @@ def _normalize_question(section_type: str, question: dict) -> dict:
     except (TypeError, ValueError):
         number = 0
 
+    answer_source = str(question.get("answer_source") or "unknown").strip() or "unknown"
+    confidence = None
+    if answer_source == "ai_inferred":
+        try:
+            confidence = int(question.get("confidence", 0))
+        except (TypeError, ValueError):
+            confidence = 0
+        confidence = max(0, min(100, confidence))
+
     normalized = {
         "number": number,
         "text": str(question.get("text") or "").strip(),
         "correct_answer": str(question.get("correct_answer") or "").strip(),
-        "answer_source": str(question.get("answer_source") or "unknown").strip() or "unknown",
+        "answer_source": answer_source,
+        "confidence": confidence,
     }
     if section_type == "MCQ":
         options = question.get("options") or {}
@@ -538,14 +551,15 @@ def _is_usable_question(question: dict) -> bool:
 
 
 
-def _question_rank(question: dict) -> tuple[int, int]:
+def _question_rank(question: dict) -> tuple[int, int, int]:
     source_rank = {
         "explicit_solution": 2,
         "ai_inferred": 1,
         "unknown": 0,
     }.get(question.get("answer_source", "unknown"), 0)
     answer_rank = 1 if question.get("correct_answer") else 0
-    return source_rank, answer_rank
+    confidence_rank = question.get("confidence") or 0
+    return source_rank, answer_rank, confidence_rank
 
 
 
@@ -603,6 +617,7 @@ def _merge_batch_results(batch_results: list[dict], topic_name: str = "Unknown C
                 if _question_rank(normalized) > _question_rank(existing):
                     existing["correct_answer"] = normalized.get("correct_answer", "")
                     existing["answer_source"] = normalized.get("answer_source", "unknown")
+                    existing["confidence"] = normalized.get("confidence")
 
     sections = []
     for section in sorted(
