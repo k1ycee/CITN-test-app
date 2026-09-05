@@ -51,7 +51,11 @@ class QuizRepository extends BaseRepository {
         if (job.quizzes.isEmpty) {
           throw Exception("Upload finished, but no quizzes were created.");
         }
-        return UploadResultModel(primaryQuizId: job.quizzes.first.id, jobId: job.jobId);
+        return UploadResultModel(
+          primaryQuizId: job.quizzes.first.id,
+          jobId: job.jobId,
+          createdQuizzes: job.quizzes,
+        );
       }
 
       if (job.status == "failed") {

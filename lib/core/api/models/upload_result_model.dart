@@ -1,8 +1,11 @@
+import "quiz_summary_model.dart";
+
 class UploadResultModel {
-  UploadResultModel({required this.primaryQuizId, this.jobId});
+  UploadResultModel({required this.primaryQuizId, this.jobId, this.createdQuizzes = const []});
 
   final int? primaryQuizId;
   final String? jobId;
+  final List<QuizSummaryModel> createdQuizzes;
 
   factory UploadResultModel.fromJson(Map<String, dynamic> json) {
     if (json.containsKey("job_id")) {

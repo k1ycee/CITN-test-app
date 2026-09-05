@@ -3,6 +3,7 @@ import "dart:async";
 import "package:file_selector/file_selector.dart";
 import "package:fpdart/fpdart.dart";
 
+import "../api/models/corrected_answer_model.dart";
 import "../api/models/course_summary_model.dart";
 import "../api/models/question_check_result_model.dart";
 import "../api/models/question_item_model.dart";
@@ -15,6 +16,10 @@ import "../repositories/base_repo.dart";
 import "../repositories/quiz/quiz_repo.dart";
 import "base/disposable_view_model.dart";
 
+List<int> quizIdsNeedingAnswerKey(List<QuizSummaryModel> quizzes) {
+  return quizzes.where((quiz) => quiz.needsAnswerKey).map((quiz) => quiz.id).toList();
+}
+
 class QuizViewModel extends DisposableViewModel {
   QuizViewModel(this._repo);
 
@@ -25,6 +30,7 @@ class QuizViewModel extends DisposableViewModel {
       <int, QuestionCheckResultModel>{};
   final Map<int, Timer> _answerDebouncers = <int, Timer>{};
   final Set<int> _checkingQuestionIds = <int>{};
+  List<int> _pendingAnswerKeyQuizIds = <int>[];
 
   List<CourseSummaryModel> _courses = const <CourseSummaryModel>[];
   List<QuizSummaryModel> _quizzes = const <QuizSummaryModel>[];
@@ -49,6 +55,8 @@ class QuizViewModel extends DisposableViewModel {
   bool get uploading => _uploading;
   bool get submitting => _submitting;
   String? get error => _error;
+  int? get pendingAnswerKeyQuizId =>
+      _pendingAnswerKeyQuizIds.isEmpty ? null : _pendingAnswerKeyQuizIds.first;
 
   Future<void> init() => refresh();
 
@@ -66,6 +74,17 @@ class QuizViewModel extends DisposableViewModel {
       _error = failure.message;
       return null;
     }, (value) => value);
+  }
+
+  void dismissPendingAnswerKey() {
+    if (_pendingAnswerKeyQuizIds.isNotEmpty) {
+      _pendingAnswerKeyQuizIds.removeAt(0);
+      notify();
+    }
+  }
+
+  Future<QuizDetailModel?> fetchQuizDetail(int id) async {
+    return _unwrap(await _repo.fetchQuiz(id));
   }
 
   Future<void> refresh({int? focusQuizId}) async {
@@ -257,6 +276,7 @@ class QuizViewModel extends DisposableViewModel {
       if (uploadResult.primaryQuizId == null) {
         _error = "Upload completed but no quiz was returned.";
       } else {
+        _pendingAnswerKeyQuizIds = quizIdsNeedingAnswerKey(uploadResult.createdQuizzes);
         await refresh(focusQuizId: uploadResult.primaryQuizId);
       }
     }
@@ -330,6 +350,59 @@ class QuizViewModel extends DisposableViewModel {
       return;
     }
     await _checkSingleQuestion(question.id, answer);
+  }
+
+  Future<bool> submitAnswerKeyManual(int quizId, List<MapEntry<int, String>> answers) async {
+    final result = _unwrap(await _repo.submitAnswerKeyManual(quizId, answers));
+    if (result == null) {
+      notify();
+      return false;
+    }
+    if (_selectedQuiz?.id == quizId) {
+      _selectedQuiz = result;
+      _syncAnswers(clearExisting: false);
+    }
+    notify();
+    return true;
+  }
+
+  Future<bool> uploadAnswerKeyDocument(int quizId, String filename, List<int> bytes) async {
+    final result = _unwrap(await _repo.uploadAnswerKeyDocument(quizId, filename, bytes));
+    if (result == null) {
+      notify();
+      return false;
+    }
+    if (_selectedQuiz?.id == quizId) {
+      _selectedQuiz = result;
+      _syncAnswers(clearExisting: false);
+    }
+    notify();
+    return true;
+  }
+
+  Future<void> correctAnswer(QuestionItemModel question, String answer) async {
+    final CorrectedAnswerModel? result = _unwrap(
+      await _repo.correctQuestionAnswer(question.id, answer),
+    );
+    if (result == null) {
+      notify();
+      return;
+    }
+    _questionResults[question.id] = QuestionCheckResultModel(
+      questionId: result.questionId,
+      questionNumber: question.questionNumber,
+      questionType: question.questionType,
+      questionText: question.questionText,
+      studentAnswer: _answers[question.id] ?? "",
+      correctAnswer: result.correctAnswer,
+      hasCorrectAnswer: true,
+      isCorrect: true,
+      status: "corrected",
+      explanation: "Answer corrected by user.",
+      answerSource: result.answerSource,
+      confidence: result.confidence,
+    );
+    notify();
   }
 
   Future<void> _checkSingleQuestion(int questionId, String answer) async {
