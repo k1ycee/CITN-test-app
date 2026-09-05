@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+from sqlalchemy import inspect, text
 from werkzeug.utils import secure_filename
 
 from config import Config
@@ -42,9 +43,43 @@ def create_app() -> Flask:
 
     with app.app_context():
         db.create_all()
+        _ensure_question_columns()
 
     register_routes(app)
     return app
+
+
+
+def _ensure_question_columns() -> None:
+    """Idempotently adds columns to a pre-existing `questions` table.
+
+    `db.create_all()` only creates TABLES that are missing; it never ALTERs
+    a table that already exists. Anyone upgrading with a pre-existing
+    quiz.db (created before `answer_source`/`confidence` were added to the
+    `Question` model) would otherwise hit `OperationalError: no such
+    column: questions.answer_source` on the very first request. This is a
+    small SQLite-oriented dev app, so a full migration framework (Alembic)
+    is overkill here -- this minimal, idempotent check is enough.
+    """
+    inspector = inspect(db.engine)
+    if "questions" not in inspector.get_table_names():
+        # Table doesn't exist yet; db.create_all() above already created it
+        # (if at all) with every column the current models define.
+        return
+
+    existing_columns = {column["name"] for column in inspector.get_columns("questions")}
+    with db.engine.begin() as connection:
+        if "answer_source" not in existing_columns:
+            connection.execute(
+                text(
+                    "ALTER TABLE questions ADD COLUMN answer_source "
+                    "VARCHAR(20) NOT NULL DEFAULT 'unknown'"
+                )
+            )
+        if "confidence" not in existing_columns:
+            connection.execute(
+                text("ALTER TABLE questions ADD COLUMN confidence INTEGER")
+            )
 
 
 
