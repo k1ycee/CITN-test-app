@@ -41,6 +41,9 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
 
+  # Used only in tests to fake the file picker for QuizViewModel.upload().
+  file_selector_platform_interface: ^2.7.0
+
   # The "flutter_lints" package below contains a set of recommended lints to
   # encourage good coding practices. The lint set provided by the package is
   # activated in the `analysis_options.yaml` file located at the root of your

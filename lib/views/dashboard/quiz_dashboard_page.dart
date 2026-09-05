@@ -10,19 +10,41 @@ bool shouldShowAnswerKeyPrompt(int? previousPendingId, int? nextPendingId) {
   return nextPendingId != null && previousPendingId != nextPendingId;
 }
 
-class QuizDashboardPage extends ConsumerWidget {
+class QuizDashboardPage extends ConsumerStatefulWidget {
   const QuizDashboardPage({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<QuizDashboardPage> createState() => _QuizDashboardPageState();
+}
+
+class _QuizDashboardPageState extends ConsumerState<QuizDashboardPage> {
+  // Tracks the last pendingAnswerKeyQuizId we've already prompted for.
+  //
+  // We can't compare against `previous` in ref.listen below: this provider
+  // is a ChangeNotifierProvider, and Riverpod hands the SAME mutable
+  // notifier instance as both `previous` and `next` on every notification,
+  // so `previous?.pendingAnswerKeyQuizId` always reads the post-mutation
+  // value too. Tracking our own last-seen id sidesteps that entirely.
+  int? _lastPromptedQuizId;
+
+  @override
+  Widget build(BuildContext context) {
     final vm = ref.watch(quizViewModelProvider);
     final quiz = vm.selectedQuiz;
     final filteredQuizzes = vm.filteredQuizzes;
 
     ref.listen(quizViewModelProvider, (previous, next) {
       final pendingId = next.pendingAnswerKeyQuizId;
-      if (shouldShowAnswerKeyPrompt(previous?.pendingAnswerKeyQuizId, pendingId)) {
-        next.dismissPendingAnswerKey();
+      if (shouldShowAnswerKeyPrompt(_lastPromptedQuizId, pendingId)) {
+        _lastPromptedQuizId = pendingId;
+        // Defer the dismiss to after this frame: calling a method that
+        // itself calls notifyListeners() synchronously from inside a
+        // ref.listen callback on the same notifier is re-entrant and can
+        // trigger a rebuild-during-build error since this listener runs
+        // during build.
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          next.dismissPendingAnswerKey();
+        });
         Navigator.of(context).push(
           MaterialPageRoute<void>(
             builder: (_) => FutureBuilder(
