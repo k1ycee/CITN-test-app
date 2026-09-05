@@ -252,15 +252,20 @@ def register_routes(app: Flask) -> None:
         if not isinstance(answers_payload, list):
             return jsonify({"error": "'answers' must be a list"}), 400
 
-        questions_by_number = {q.question_number: q for q in quiz.questions}
+        # Keyed by question_id (not question_number): a quiz can have an
+        # MCQ section and an SAQ section that both number their questions
+        # 1..N, so question_number is not unique within a quiz. The
+        # document-upload answer-key path below has no question ids to
+        # reference and must keep matching by number; this manual path has
+        # real question ids from the client, so use those instead.
         applied = 0
         for item in answers_payload:
-            question_number = item.get("question_number")
+            question_id = item.get("question_id")
             answer = str(item.get("answer", "")).strip()
-            if question_number is None or not answer:
+            if question_id is None or not answer:
                 continue
-            question = questions_by_number.get(int(question_number))
-            if question is None:
+            question = Question.query.get(int(question_id))
+            if question is None or question.quiz_id != quiz.id:
                 continue
             set_question_answer(question, answer, "user_provided")
             applied += 1

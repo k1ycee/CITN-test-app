@@ -32,7 +32,7 @@ class _RecordingAdapter implements HttpClientAdapter {
 }
 
 void main() {
-  test("submitAnswerKeyManual posts question numbers and answers", () async {
+  test("submitAnswerKeyManual posts question ids and answers", () async {
     final adapter = _RecordingAdapter({
       "applied": 1,
       "quiz": {
@@ -52,7 +52,7 @@ void main() {
     expect(quiz.needsAnswerKey, isFalse);
     final sentData = adapter.lastRequest!.data as Map<String, dynamic>;
     expect(sentData["answers"], [
-      {"question_number": 1, "answer": "42"},
+      {"question_id": 1, "answer": "42"},
     ]);
   });
 

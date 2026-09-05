@@ -84,7 +84,7 @@ void main() {
 
     final sentData = adapter.lastRequest!.data as Map<String, dynamic>;
     expect(sentData["answers"], [
-      {"question_number": 1, "answer": "42"},
+      {"question_id": 10, "answer": "42"},
     ]);
   });
 }

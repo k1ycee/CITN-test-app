@@ -39,7 +39,7 @@ class _AnswerKeyPageState extends ConsumerState<AnswerKeyPage> {
     for (final question in widget.quiz.questions) {
       final text = _controllers[question.id]?.text.trim() ?? "";
       if (text.isNotEmpty) {
-        answers.add(MapEntry(question.questionNumber, text));
+        answers.add(MapEntry(question.id, text));
       }
     }
     if (answers.isEmpty) {

@@ -74,6 +74,9 @@ class QuizClient {
     );
   }
 
+  /// Submits manually-typed answers keyed by question ID (not question
+  /// NUMBER, which is not unique within a quiz when it has both an MCQ and
+  /// an SAQ section that each number their questions 1..N).
   Future<QuizDetailModel> submitAnswerKeyManual(
     int quizId,
     List<MapEntry<int, String>> answers,
@@ -82,7 +85,7 @@ class QuizClient {
       QuizUrls.answerKeyManual(quizId),
       data: <String, dynamic>{
         "answers": answers
-            .map((entry) => {"question_number": entry.key, "answer": entry.value})
+            .map((entry) => {"question_id": entry.key, "answer": entry.value})
             .toList(),
       },
     );
