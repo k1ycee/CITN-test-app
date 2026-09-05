@@ -34,7 +34,6 @@ if Config.TESSERACT_CMD:
 OCR_MIN_TEXT_LENGTH = 20
 
 SECTION_ORDER = {"MCQ": 0, "SAQ": 1, "SEQ": 2}
-TOPIC_HEADING_RE = re.compile(r"FOUNDATION\s*:\s*([^\n]+)", re.IGNORECASE)
 
 PARSE_PROMPT_TEMPLATE = """You are an expert exam paper parser.
 
@@ -106,6 +105,22 @@ Return ONLY valid JSON (no markdown, no code fences):
 }}
 """
 
+SEGMENT_PROMPT_TEMPLATE = """You are analyzing an exam paper made of {page_count} pages, each marked with a "--- PAGE N ---" header.
+
+Identify the distinct topic or course sections in this document. A new topic usually starts with a heading naming a subject/course (e.g. "FOUNDATION: BUSINESS LAW"), but wording varies by document, so use your judgment about where one topic's questions end and the next begins.
+
+Return ONLY valid JSON: a list of segments in page order, covering every page exactly once, in this format:
+[
+  {{"topic_name": "Business Law", "start_page": 1, "end_page": 4}},
+  {{"topic_name": "Economics", "start_page": 5, "end_page": 9}}
+]
+
+If the whole document is a single topic, return one segment covering all {page_count} pages.
+
+Document:
+
+"""
+
 
 def _ensure_gemini():
     global _gemini_configured
@@ -172,34 +187,60 @@ def _join_pages(pages: list[str]) -> str:
     )
 
 
+def segment_topics_with_ai(pages: list[str]) -> list[dict]:
+    _ensure_gemini()
+    joined = _join_pages(pages)
+    model = _build_model()
+    prompt = SEGMENT_PROMPT_TEMPLATE.format(page_count=len(pages)) + joined
+
+    try:
+        response = model.generate_content(
+            prompt,
+            request_options={"timeout": Config.GEMINI_REQUEST_TIMEOUT},
+        )
+        segments = _extract_json_payload(response.text)
+    except Exception:
+        logger.exception("AI topic segmentation failed; treating document as one topic")
+        return []
+
+    if not isinstance(segments, list):
+        logger.warning("AI segmentation returned a non-list payload; treating document as one topic")
+        return []
+
+    normalized = []
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        topic_name = str(segment.get("topic_name") or "").strip()
+        try:
+            start_page = int(segment.get("start_page", 0))
+            end_page = int(segment.get("end_page", 0))
+        except (TypeError, ValueError):
+            continue
+        if not topic_name or start_page < 1 or end_page < start_page or end_page > len(pages):
+            continue
+        normalized.append({"topic_name": topic_name, "start_page": start_page, "end_page": end_page})
+
+    return normalized
+
 
 def extract_topic_segments_from_pdf(pdf_path: str) -> list[dict]:
     pages = extract_pages_from_pdf(pdf_path)
-    full_text = _join_pages(pages)
-    matches = list(TOPIC_HEADING_RE.finditer(full_text))
+    segments = segment_topics_with_ai(pages)
 
-    if not matches:
-        return [
-            {
-                "topic_name": "Unknown Course",
-                "text": full_text,
-            }
-        ]
+    if not segments:
+        return [{"topic_name": "Unknown Course", "text": _join_pages(pages)}]
 
     topics = []
-    for index, match in enumerate(matches):
-        topic_name = match.group(1).strip()
-        start = match.start()
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(full_text)
-        topic_text = full_text[start:end].strip()
-        if not topic_text:
+    for segment in segments:
+        page_slice = pages[segment["start_page"] - 1 : segment["end_page"]]
+        topic_text = _join_pages(page_slice)
+        if not topic_text.strip():
             continue
-        topics.append(
-            {
-                "topic_name": topic_name,
-                "text": topic_text,
-            }
-        )
+        topics.append({"topic_name": segment["topic_name"], "text": topic_text})
+
+    if not topics:
+        return [{"topic_name": "Unknown Course", "text": _join_pages(pages)}]
 
     logger.info("Detected %d topic segments", len(topics))
     return topics
@@ -258,7 +299,7 @@ def _extract_json_payload(raw_text: str):
         raise json.JSONDecodeError("empty response", raw_text, 0)
 
     decoder = json.JSONDecoder()
-    for start_char in ("{", "["):
+    for start_char in ("[", "{"):
         start_index = raw_text.find(start_char)
         if start_index == -1:
             continue
