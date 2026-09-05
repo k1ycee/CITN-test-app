@@ -9,6 +9,7 @@ Each topic is then parsed independently so completed topics can be stored as
 individual quizzes while later topics are still processing.
 """
 
+import io
 import json
 import logging
 import os
@@ -17,13 +18,20 @@ from collections import OrderedDict
 
 import fitz  # PyMuPDF
 import google.generativeai as genai
+import pytesseract
 from google.api_core.exceptions import DeadlineExceeded
+from PIL import Image
 
 from config import Config
 
 logger = logging.getLogger(__name__)
 
 _gemini_configured = False
+
+if Config.TESSERACT_CMD:
+    pytesseract.pytesseract.tesseract_cmd = Config.TESSERACT_CMD
+
+OCR_MIN_TEXT_LENGTH = 20
 
 SECTION_ORDER = {"MCQ": 0, "SAQ": 1, "SEQ": 2}
 TOPIC_HEADING_RE = re.compile(r"FOUNDATION\s*:\s*([^\n]+)", re.IGNORECASE)
@@ -112,18 +120,41 @@ def _ensure_gemini():
         _gemini_configured = True
 
 
+def _ocr_page(page) -> str:
+    pix = page.get_pixmap(dpi=300)
+    image = Image.open(io.BytesIO(pix.tobytes("png")))
+    try:
+        return pytesseract.image_to_string(image).strip()
+    except Exception:
+        logger.exception("OCR failed for a page; continuing with empty text")
+        return ""
+
+
+def _extract_page_text(page) -> tuple[str, bool]:
+    text = page.get_text("text").strip()
+    if len(text) >= OCR_MIN_TEXT_LENGTH:
+        return text, False
+    ocr_text = _ocr_page(page)
+    if ocr_text:
+        return ocr_text, True
+    return text, False
+
 
 def extract_pages_from_pdf(pdf_path: str) -> list[str]:
     doc = fitz.open(pdf_path)
     pages = []
+    ocr_page_count = 0
     for page_num in range(len(doc)):
-        page = doc[page_num]
-        pages.append(page.get_text("text").strip())
+        text, used_ocr = _extract_page_text(doc[page_num])
+        if used_ocr:
+            ocr_page_count += 1
+        pages.append(text)
     doc.close()
     logger.info(
-        "Extracted %d pages from %s",
+        "Extracted %d pages from %s (%d via OCR)",
         len(pages),
         os.path.basename(pdf_path),
+        ocr_page_count,
     )
     return pages
 

@@ -6,3 +6,5 @@ google-generativeai==0.8.5
 python-dotenv==1.1.0
 gunicorn==23.0.0
 pytest==8.3.4
+pytesseract==0.3.13
+Pillow==11.1.0

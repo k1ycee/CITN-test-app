@@ -37,3 +37,4 @@ class Config:
     GEMINI_REQUEST_TIMEOUT = int(
         os.getenv("GEMINI_REQUEST_TIMEOUT", "30")
     )
+    TESSERACT_CMD = os.getenv("TESSERACT_CMD", "")
