@@ -1,6 +1,7 @@
 import "package:fpdart/fpdart.dart";
 
 import "../../api/clients/quiz_client/quiz_client.dart";
+import "../../api/models/corrected_answer_model.dart";
 import "../../api/models/course_summary_model.dart";
 import "../../api/models/question_check_result_model.dart";
 import "../../api/models/quiz_detail_model.dart";
@@ -75,4 +76,20 @@ class QuizRepository extends BaseRepository {
     int questionId,
     String answer,
   ) => handleRequestFailure(() => _client.submitQuestion(questionId, answer));
+
+  Future<Either<RequestFailure, QuizDetailModel>> submitAnswerKeyManual(
+    int quizId,
+    List<MapEntry<int, String>> answers,
+  ) => handleRequestFailure(() => _client.submitAnswerKeyManual(quizId, answers));
+
+  Future<Either<RequestFailure, QuizDetailModel>> uploadAnswerKeyDocument(
+    int quizId,
+    String filename,
+    List<int> bytes,
+  ) => handleRequestFailure(() => _client.uploadAnswerKeyDocument(quizId, filename, bytes));
+
+  Future<Either<RequestFailure, CorrectedAnswerModel>> correctQuestionAnswer(
+    int questionId,
+    String answer,
+  ) => handleRequestFailure(() => _client.correctQuestionAnswer(questionId, answer));
 }
