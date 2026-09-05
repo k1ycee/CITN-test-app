@@ -85,6 +85,7 @@ class QuizDashboardPage extends ConsumerWidget {
                     onChange: vm.handleAnswerChange,
                     onCheckQuestion: vm.checkQuestion,
                     onSubmit: vm.submit,
+                    onCorrectAnswer: vm.correctAnswer,
                   );
 
                   return ListView(

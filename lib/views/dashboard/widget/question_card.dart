@@ -12,6 +12,7 @@ class QuestionCard extends StatelessWidget {
     required this.isChecking,
     required this.onChanged,
     required this.onCheck,
+    required this.onCorrect,
   });
 
   final QuestionItemModel question;
@@ -20,6 +21,7 @@ class QuestionCard extends StatelessWidget {
   final bool isChecking;
   final ValueChanged<String> onChanged;
   final VoidCallback onCheck;
+  final ValueChanged<String> onCorrect;
 
   @override
   Widget build(BuildContext context) {
@@ -129,9 +131,80 @@ class QuestionCard extends StatelessWidget {
             ],
             const SizedBox(height: 4),
             Text(result!.explanation),
+            if (result!.answerSource == "ai_inferred" || result!.answerSource == "unknown") ...[
+              const SizedBox(height: 10),
+              _AiAnswerReview(result: result!, onCorrect: onCorrect),
+            ],
           ],
         ],
       ),
+    );
+  }
+}
+
+class _AiAnswerReview extends StatefulWidget {
+  const _AiAnswerReview({required this.result, required this.onCorrect});
+
+  final QuestionCheckResultModel result;
+  final ValueChanged<String> onCorrect;
+
+  @override
+  State<_AiAnswerReview> createState() => _AiAnswerReviewState();
+}
+
+class _AiAnswerReviewState extends State<_AiAnswerReview> {
+  final _controller = TextEditingController();
+  bool _editing = false;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final label = widget.result.answerSource == "ai_inferred"
+        ? "AI's best guess"
+            "${widget.result.confidence != null ? " · ${widget.result.confidence}% confidence" : ""}"
+        : "AI couldn't determine an answer";
+
+    if (!_editing) {
+      return Row(
+        children: [
+          Expanded(
+            child: Text(label, style: const TextStyle(fontStyle: FontStyle.italic)),
+          ),
+          TextButton(
+            onPressed: () => setState(() => _editing = true),
+            child: const Text("Correct this"),
+          ),
+        ],
+      );
+    }
+
+    return Row(
+      children: [
+        Expanded(
+          child: TextFormField(
+            controller: _controller,
+            decoration: const InputDecoration(
+              border: OutlineInputBorder(),
+              hintText: "Enter the correct answer",
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
+        IconButton(
+          icon: const Icon(Icons.check),
+          onPressed: () {
+            final value = _controller.text.trim();
+            if (value.isEmpty) return;
+            widget.onCorrect(value);
+            setState(() => _editing = false);
+          },
+        ),
+      ],
     );
   }
 }

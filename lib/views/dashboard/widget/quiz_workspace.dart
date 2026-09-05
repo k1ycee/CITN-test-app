@@ -18,6 +18,7 @@ class QuizWorkspace extends StatelessWidget {
     required this.onChange,
     required this.onCheckQuestion,
     required this.onSubmit,
+    required this.onCorrectAnswer,
   });
 
   final QuizDetailModel? quiz;
@@ -29,6 +30,7 @@ class QuizWorkspace extends StatelessWidget {
   final void Function(QuestionItemModel question, String value) onChange;
   final Future<void> Function(QuestionItemModel question) onCheckQuestion;
   final Future<void> Function() onSubmit;
+  final Future<void> Function(QuestionItemModel question, String value) onCorrectAnswer;
 
   @override
   Widget build(BuildContext context) {
@@ -90,6 +92,7 @@ class QuizWorkspace extends StatelessWidget {
                   isChecking: checkingQuestionIds.contains(question.id),
                   onChanged: (value) => onChange(question, value),
                   onCheck: () => onCheckQuestion(question),
+                  onCorrect: (value) => onCorrectAnswer(question, value),
                 ),
               ),
             Align(
