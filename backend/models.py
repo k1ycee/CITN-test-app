@@ -81,7 +81,8 @@ class Quiz(db.Model):
     def needs_answer_key(self) -> bool:
         if not self.questions:
             return False
-        return not any(question.answer_source == "explicit_solution" for question in self.questions)
+        confirmed_sources = ("explicit_solution", "user_provided", "user_corrected")
+        return not any(question.answer_source in confirmed_sources for question in self.questions)
 
 
 class Question(db.Model):

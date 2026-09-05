@@ -9,7 +9,7 @@ from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
 from config import Config
-from models import Course, Question, Quiz, Submission, SubmissionAnswer, db
+from models import Course, Question, Quiz, Submission, SubmissionAnswer, db, set_question_answer
 from pdf_parser import (
     extract_topic_segments_from_pdf,
     grade_answer_with_ai,
@@ -184,6 +184,33 @@ def register_routes(app: Flask) -> None:
         payload = request.get_json(silent=True) or {}
         student_answer = str(payload.get("answer", "")).strip()
         return jsonify({"quiz_id": question.quiz_id, "result": _build_question_result(question, student_answer)})
+
+    @app.post("/api/quizzes/<int:quiz_id>/answer-key/manual")
+    def submit_manual_answer_key(quiz_id: int):
+        quiz = Quiz.query.get_or_404(quiz_id)
+        payload = request.get_json(silent=True) or {}
+        answers_payload = payload.get("answers")
+
+        if not isinstance(answers_payload, list):
+            return jsonify({"error": "'answers' must be a list"}), 400
+
+        questions_by_number = {q.question_number: q for q in quiz.questions}
+        applied = 0
+        for item in answers_payload:
+            question_number = item.get("question_number")
+            answer = str(item.get("answer", "")).strip()
+            if question_number is None or not answer:
+                continue
+            question = questions_by_number.get(int(question_number))
+            if question is None:
+                continue
+            set_question_answer(question, answer, "user_provided")
+            applied += 1
+
+        db.session.commit()
+        db.session.expunge_all()
+        quiz = Quiz.query.get_or_404(quiz_id)
+        return jsonify({"applied": applied, "quiz": quiz.to_dict(include_questions=True)})
 
 
 
