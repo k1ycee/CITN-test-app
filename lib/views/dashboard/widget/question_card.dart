@@ -74,17 +74,25 @@ class QuestionCard extends StatelessWidget {
           Text(question.questionText),
           const SizedBox(height: 12),
           if (question.questionType == "MCQ" && question.options != null)
-            ...question.options!.entries
-                .where((entry) => (entry.value ?? "").trim().isNotEmpty)
-                .map(
-                  (entry) => RadioListTile<String>(
-                    value: entry.key.toUpperCase(),
-                    groupValue: currentAnswer.isEmpty ? null : currentAnswer,
-                    contentPadding: EdgeInsets.zero,
-                    title: Text("${entry.key.toUpperCase()}. ${entry.value}"),
-                    onChanged: (value) => onChanged(value ?? ""),
-                  ),
-                )
+            Material(
+              color: Colors.transparent,
+              child: Column(
+                children: question.options!.entries
+                    .where((entry) => (entry.value ?? "").trim().isNotEmpty)
+                    .map(
+                      (entry) => RadioListTile<String>(
+                        value: entry.key.toUpperCase(),
+                        groupValue:
+                            currentAnswer.isEmpty ? null : currentAnswer,
+                        contentPadding: EdgeInsets.zero,
+                        title:
+                            Text("${entry.key.toUpperCase()}. ${entry.value}"),
+                        onChanged: (value) => onChanged(value ?? ""),
+                      ),
+                    )
+                    .toList(),
+              ),
+            )
           else
             Column(
               crossAxisAlignment: CrossAxisAlignment.start,
