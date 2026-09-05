@@ -299,10 +299,8 @@ def _extract_json_payload(raw_text: str):
         raise json.JSONDecodeError("empty response", raw_text, 0)
 
     decoder = json.JSONDecoder()
-    for start_char in ("[", "{"):
-        start_index = raw_text.find(start_char)
-        if start_index == -1:
-            continue
+    candidate_indices = [raw_text.find(start_char) for start_char in ("{", "[")]
+    for start_index in sorted(index for index in candidate_indices if index != -1):
         try:
             payload, _ = decoder.raw_decode(raw_text[start_index:])
             return payload
