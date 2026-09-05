@@ -70,11 +70,18 @@ class Quiz(db.Model):
                 1 for q in self.questions if q.question_type == "SEQ"
             ),
             "submission_count": len(self.submissions),
+            "needs_answer_key": self.needs_answer_key,
             "created_at": self.created_at.isoformat(),
         }
         if include_questions:
             data["questions"] = [q.to_dict() for q in self.questions]
         return data
+
+    @property
+    def needs_answer_key(self) -> bool:
+        if not self.questions:
+            return False
+        return not any(question.answer_source == "explicit_solution" for question in self.questions)
 
 
 class Question(db.Model):

@@ -246,6 +246,8 @@ def _store_parsed_quiz(filename: str, parsed: dict) -> Quiz:
                 option_c=options.get("c"),
                 option_d=options.get("d"),
                 correct_answer=str(question_data.get("correct_answer", "")).strip(),
+                answer_source=str(question_data.get("answer_source") or "unknown").strip() or "unknown",
+                confidence=question_data.get("confidence"),
             )
             db.session.add(question)
 
