@@ -186,6 +186,28 @@ def register_routes(app: Flask) -> None:
         student_answer = str(payload.get("answer", "")).strip()
         return jsonify({"quiz_id": question.quiz_id, "result": _build_question_result(question, student_answer)})
 
+    @app.post("/api/questions/<int:question_id>/correct")
+    def correct_question_answer(question_id: int):
+        question = Question.query.get_or_404(question_id)
+        payload = request.get_json(silent=True) or {}
+        answer = str(payload.get("answer", "")).strip()
+
+        if not answer:
+            return jsonify({"error": "'answer' must not be empty"}), 400
+
+        set_question_answer(question, answer, "user_corrected")
+        db.session.commit()
+
+        return jsonify(
+            {
+                "quiz_id": question.quiz_id,
+                "question_id": question.id,
+                "correct_answer": question.correct_answer,
+                "answer_source": question.answer_source,
+                "confidence": question.confidence,
+            }
+        )
+
     @app.post("/api/quizzes/<int:quiz_id>/answer-key/manual")
     def submit_manual_answer_key(quiz_id: int):
         quiz = Quiz.query.get_or_404(quiz_id)
@@ -274,6 +296,8 @@ def _build_question_result(question: Question, student_answer: str) -> dict:
         "is_correct": grading["is_correct"],
         "status": grading["status"],
         "explanation": grading.get("explanation", ""),
+        "answer_source": question.answer_source,
+        "confidence": question.confidence,
     }
 
 
