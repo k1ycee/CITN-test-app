@@ -1,5 +1,6 @@
 import "package:dio/dio.dart";
 
+import "../../models/corrected_answer_model.dart";
 import "../../models/course_summary_model.dart";
 import "../../models/question_check_result_model.dart";
 import "../../models/quiz_detail_model.dart";
@@ -71,5 +72,43 @@ class QuizClient {
     return QuestionCheckResultModel.fromJson(
       response.data!["result"] as Map<String, dynamic>,
     );
+  }
+
+  Future<QuizDetailModel> submitAnswerKeyManual(
+    int quizId,
+    List<MapEntry<int, String>> answers,
+  ) async {
+    final response = await _dio.post<Map<String, dynamic>>(
+      QuizUrls.answerKeyManual(quizId),
+      data: <String, dynamic>{
+        "answers": answers
+            .map((entry) => {"question_number": entry.key, "answer": entry.value})
+            .toList(),
+      },
+    );
+    return QuizDetailModel.fromJson(response.data!["quiz"] as Map<String, dynamic>);
+  }
+
+  Future<QuizDetailModel> uploadAnswerKeyDocument(
+    int quizId,
+    String filename,
+    List<int> bytes,
+  ) async {
+    final formData = FormData.fromMap(<String, dynamic>{
+      "file": MultipartFile.fromBytes(bytes, filename: filename),
+    });
+    final response = await _dio.post<Map<String, dynamic>>(
+      QuizUrls.answerKeyUpload(quizId),
+      data: formData,
+    );
+    return QuizDetailModel.fromJson(response.data!["quiz"] as Map<String, dynamic>);
+  }
+
+  Future<CorrectedAnswerModel> correctQuestionAnswer(int questionId, String answer) async {
+    final response = await _dio.post<Map<String, dynamic>>(
+      QuizUrls.correctQuestion(questionId),
+      data: <String, dynamic>{"answer": answer},
+    );
+    return CorrectedAnswerModel.fromJson(response.data!);
   }
 }
