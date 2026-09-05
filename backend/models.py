@@ -97,9 +97,17 @@ class Question(db.Model):
     option_d = db.Column(db.Text, nullable=True)
 
     correct_answer = db.Column(db.Text, nullable=False)
+    answer_source = db.Column(db.String(20), nullable=False, default="unknown")
+    confidence = db.Column(db.Integer, nullable=True)
 
     submission_answers = db.relationship(
         "SubmissionAnswer",
+        backref="question",
+        lazy=True,
+        cascade="all, delete-orphan",
+    )
+    answer_events = db.relationship(
+        "AnswerEvent",
         backref="question",
         lazy=True,
         cascade="all, delete-orphan",
@@ -113,6 +121,8 @@ class Question(db.Model):
             "section_label": self.section_label,
             "question_number": self.question_number,
             "question_text": self.question_text,
+            "answer_source": self.answer_source,
+            "confidence": self.confidence,
         }
         if self.question_type == "MCQ":
             data["options"] = {
@@ -195,3 +205,48 @@ class SubmissionAnswer(db.Model):
             "question_number": self.question.question_number if self.question else None,
             "question_type": self.question.question_type if self.question else None,
         }
+
+
+class AnswerEvent(db.Model):
+    """A record of a question's correct answer being set or corrected."""
+
+    __tablename__ = "answer_events"
+
+    id = db.Column(db.Integer, primary_key=True)
+    question_id = db.Column(db.Integer, db.ForeignKey("questions.id"), nullable=False)
+    previous_answer = db.Column(db.Text, nullable=False)
+    previous_source = db.Column(db.String(20), nullable=False)
+    new_answer = db.Column(db.Text, nullable=False)
+    new_source = db.Column(db.String(20), nullable=False)
+    confidence_at_time = db.Column(db.Integer, nullable=True)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "question_id": self.question_id,
+            "previous_answer": self.previous_answer,
+            "previous_source": self.previous_source,
+            "new_answer": self.new_answer,
+            "new_source": self.new_source,
+            "confidence_at_time": self.confidence_at_time,
+            "created_at": self.created_at.isoformat(),
+        }
+
+
+def set_question_answer(question: Question, new_answer: str, new_source: str) -> AnswerEvent:
+    """Updates a question's live correct answer and logs the change for future reference."""
+    event = AnswerEvent(
+        question=question,
+        previous_answer=question.correct_answer,
+        previous_source=question.answer_source,
+        new_answer=new_answer,
+        new_source=new_source,
+        confidence_at_time=question.confidence,
+    )
+    question.correct_answer = new_answer
+    question.answer_source = new_source
+    question.confidence = None
+    db.session.add(event)
+    db.session.add(question)
+    return event
