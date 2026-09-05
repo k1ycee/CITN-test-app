@@ -10,6 +10,8 @@ class QuestionCheckResultModel {
     required this.isCorrect,
     required this.status,
     required this.explanation,
+    required this.answerSource,
+    required this.confidence,
   });
 
   final int questionId;
@@ -22,6 +24,8 @@ class QuestionCheckResultModel {
   final bool isCorrect;
   final String status;
   final String explanation;
+  final String answerSource;
+  final int? confidence;
 
   factory QuestionCheckResultModel.fromJson(Map<String, dynamic> json) {
     return QuestionCheckResultModel(
@@ -35,6 +39,8 @@ class QuestionCheckResultModel {
       isCorrect: json["is_correct"] as bool? ?? false,
       status: json["status"] as String? ?? "incorrect",
       explanation: json["explanation"] as String? ?? "",
+      answerSource: json["answer_source"] as String? ?? "unknown",
+      confidence: json["confidence"] as int?,
     );
   }
 }
