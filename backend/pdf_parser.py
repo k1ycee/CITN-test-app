@@ -121,9 +121,9 @@ def _ensure_gemini():
 
 
 def _ocr_page(page) -> str:
-    pix = page.get_pixmap(dpi=300)
-    image = Image.open(io.BytesIO(pix.tobytes("png")))
     try:
+        pix = page.get_pixmap(dpi=300)
+        image = Image.open(io.BytesIO(pix.tobytes("png")))
         return pytesseract.image_to_string(image).strip()
     except Exception:
         logger.exception("OCR failed for a page; continuing with empty text")
