@@ -59,6 +59,10 @@ $envExampleFile = Join-Path $scriptDir ".env.example"
 
 Write-Step "Using Python command: $python"
 
+if (-not (Get-Command "tesseract" -ErrorAction SilentlyContinue)) {
+    Write-Host "WARNING: tesseract was not found on PATH. Scanned-PDF OCR will fail until it's installed (e.g. via 'choco install tesseract') and PATH is updated, or TESSERACT_CMD is set in .env." -ForegroundColor Yellow
+}
+
 if (-not (Test-Path $venvPython)) {
     Write-Step "Creating virtual environment"
     Invoke-Python -PythonExe $python -Arguments "-m venv `"$venvDir`""

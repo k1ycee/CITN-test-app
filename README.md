@@ -30,6 +30,14 @@ cp .env.example .env
 python app.py
 ```
 
+### OCR system dependency
+
+Scanned/image-only PDFs are read via Tesseract OCR. Install the `tesseract-ocr` binary separately:
+
+- macOS: `brew install tesseract`
+- Debian/Ubuntu: `sudo apt-get install tesseract-ocr`
+- Windows: install via `choco install tesseract` or the [official installer](https://github.com/UB-Mannheim/tesseract/wiki), then either add it to PATH or set `TESSERACT_CMD` in `.env` to its full path.
+
 Backend runs on `http://127.0.0.1:3000` by default.
 
 On Windows PowerShell you can bootstrap and run the backend with:
@@ -69,6 +77,9 @@ The Flutter app should point to the backend at `http://127.0.0.1:3000/api` unles
 - `GET /api/quizzes/<id>`
 - `POST /api/upload`
 - `POST /api/quizzes/<id>/submit`
+- `POST /api/quizzes/<id>/answer-key/manual`
+- `POST /api/quizzes/<id>/answer-key/upload`
+- `POST /api/questions/<id>/correct`
 
 ## Docker
 
@@ -86,3 +97,6 @@ Services:
 - SAQ/SEQ grading uses Gemini semantic evaluation with an exact-match fallback.
 - Uploaded PDFs are stored in `backend/uploads/`.
 - SQLite data persists in `backend/instance/quiz.db` unless you override `DATABASE_URL`.
+- Pages with no extractable text layer fall back to Tesseract OCR.
+- Topic segmentation and answer-key extraction both run as Gemini calls rather than fixed-format parsing.
+- Backend tests: `cd backend && python -m pytest`.
