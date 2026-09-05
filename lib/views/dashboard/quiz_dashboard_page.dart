@@ -2,8 +2,13 @@ import "package:flutter/material.dart";
 import "package:hooks_riverpod/hooks_riverpod.dart";
 
 import "../../core/providers.dart";
+import "../answer_key/answer_key_page.dart";
 import "widget/quiz_list.dart";
 import "widget/quiz_workspace.dart";
+
+bool shouldShowAnswerKeyPrompt(int? previousPendingId, int? nextPendingId) {
+  return nextPendingId != null && previousPendingId != nextPendingId;
+}
 
 class QuizDashboardPage extends ConsumerWidget {
   const QuizDashboardPage({super.key});
@@ -13,6 +18,27 @@ class QuizDashboardPage extends ConsumerWidget {
     final vm = ref.watch(quizViewModelProvider);
     final quiz = vm.selectedQuiz;
     final filteredQuizzes = vm.filteredQuizzes;
+
+    ref.listen(quizViewModelProvider, (previous, next) {
+      final pendingId = next.pendingAnswerKeyQuizId;
+      if (shouldShowAnswerKeyPrompt(previous?.pendingAnswerKeyQuizId, pendingId)) {
+        next.dismissPendingAnswerKey();
+        Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => FutureBuilder(
+              future: next.fetchQuizDetail(pendingId!),
+              builder: (context, snapshot) {
+                final quiz = snapshot.data;
+                if (quiz == null) {
+                  return const Scaffold(body: Center(child: CircularProgressIndicator()));
+                }
+                return AnswerKeyPage(quiz: quiz);
+              },
+            ),
+          ),
+        );
+      }
+    });
 
     return Scaffold(
       appBar: AppBar(
